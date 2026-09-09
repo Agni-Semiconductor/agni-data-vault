@@ -11,3 +11,4 @@ supabase/.temp
 __pycache__
 .venv
 .model-manager/
+backfill/

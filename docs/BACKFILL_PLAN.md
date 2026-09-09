@@ -31,10 +31,15 @@ Caveat on `inventory.csv`: `diameter_um` and `T_meas_C` there are registry defau
 | corpus | files | bytes | plan |
 |---|---|---|---|
 | `Agni/data` Clarius exports (`.xls/.xlsx`) | 2,106 | see §3a | Phase A — upload bytes + full labels |
-| `Agni/data/supabase campaigns` board CSVs | ~16,600 | see §3a | **not uploaded**; already in the `automated-testing` Supabase project. Phase C registers one measurement per campaign run with `meta.external = {project: yabtiaqddwurmurmowvk, table: captures, campaign_run_id}` and attaches only the derived summary CSVs (manifest, device_labels_v2, yield) |
-| `Work Flows/Data Processing/FeD Electrical Data` | ~1,158 | see §3a | Phase B — same tool, second root |
-| `Model/data/raw` (literature + Han2026 crossbar) | ~408 | see §3a | Phase B, tagged `meta.origin = literature` where the registry says so |
-| decks/notes used as evidence (`.pptx`, `.md`, `.txt`) | dozens | small | not uploaded as measurement files; cited in `meta.evidence`; the deck itself is attached once to the sample as `kind: other` |
+| `Agni/data/supabase campaigns` board CSVs | 16,821 | 1,012 MB | **not uploaded**; already in the `automated-testing` Supabase project. Phase C registers one measurement per campaign run with `meta.external = {project: yabtiaqddwurmurmowvk, table: captures, campaign_run_id}` and attaches only the derived summary CSVs (manifest, device_labels_v2, yield) |
+| `Agni/data/August 1st 128 mega run` (128×128 board run, excluded from the registry inventory) | 4,398 | 2,328 MB | Phase C decision: either Pro storage + bulk upload as one measurement per board run, or pointer-only like the campaigns. It is 54% of the whole archive; default is pointer-only until Spencer says otherwise |
+| other 8x8 / board / socket folders (`8x8 Board`, `7_27 full8x8test`, `8x8 Testing Board 7_13`, `7_24 D2P2 8x8 samples`, `8_4 HEATED Write disturb 8x8`, `8_26 Socket Testing`, `9_4 Board Testing`) | ~860 | ~110 MB | Phase A2 — same tool; sample container per board/chip, device_address from filename tokens; labels limited to E1–E3 |
+| `Work Flows/Data Processing/FeD Electrical Data` | ~1,158 | not yet measured | Phase B — same tool, second root |
+| `Model/data/raw` (literature + Han2026 crossbar) | ~408 | not yet measured | Phase B, tagged `meta.origin = literature` where the registry says so |
+| images (`.png` 2,853 = 290 MB, `.bmp` 93 = 313 MB) | 2,946 | 603 MB | plots and screenshots; attach only when a filename ties them to a run (`DC-IV_Run4482.png`), as `kind: plot_png`; the 93 BMP microscope/scope screenshots wait for Phase B |
+| decks/notes used as evidence (`.pptx` 8 files 23.5 MB, `.md`, `.txt`) | ~90 | 24 MB | not uploaded as measurement files; cited in `meta.evidence`; a deck is attached once to its sample as `kind: other` |
+
+Whole archive: 4,289 MB. Phase A (239 MB) plus Phase A2 (~110 MB) stays under the free tier; everything beyond that needs Pro or pointers.
 
 §3a Storage numbers (from `inventory.csv` sizes, 2026-09-09):
 

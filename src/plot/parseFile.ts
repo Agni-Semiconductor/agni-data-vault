@@ -10,6 +10,8 @@ const META_SHEETS = /^(calc|settings|summary|setup|notes)$/i
 const numeric = /^-?\d*\.?\d+(e[-+]?\d+)?$/i
 
 export function sniffSource(bytes: Uint8Array, name: string): ParsedFile['source'] {
+    const magic = (offset: number, ...expected: number[]) => expected.every((byte, index) => bytes[offset + index] === byte)
+  if (magic(0, 0x42, 0x4d) || magic(0, 0x89, 0x50, 0x4e, 0x47) || magic(0, 0xff, 0xd8) || magic(0, 0x47, 0x49, 0x46, 0x38)) throw new Error('image file — not tabular') // BM=BMP, PNG, JPEG, GIF8
   if (bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0) return 'xls_biff'
   if (bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) return 'xlsx'
   const first = new TextDecoder().decode(bytes).replace(/^\uFEFF/, '').trimStart()[0]

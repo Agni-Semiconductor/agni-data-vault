@@ -87,7 +87,8 @@ export function formatValue(def: FieldDef, value: unknown, lists?: Record<string
   if (def.type === 'select' || def.type === 'person') return lists?.[def.options_list_key ?? '']?.find((option) => option.value === value)?.label ?? String(value)
   if (def.type === 'multiselect') return (Array.isArray(value) ? value : []).map((item) => lists?.[def.options_list_key ?? '']?.find((option) => option.value === item)?.label ?? item).join(', ')
   if (def.type === 'layer_stack') return (Array.isArray(value) ? value as StackLayer[] : []).map((layer) => `${layer.material}${layer.t_nm === null || layer.t_nm === undefined ? '' : ` ${layer.t_nm}`}`).join(' / ')
-  if (def.type === 'json') return JSON.stringify(value)
+  if (Array.isArray(value) && value.every((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item))) return value.map((item) => (item === null ? '' : String(item))).join(', ')
+  if (def.type === 'json') return JSON.stringify(value, null, 2)
   return String(value)
 }
 

@@ -25,7 +25,7 @@ VAULT_API_URL=http://localhost:3001 VAULT_API_KEY=<key> bash scripts/smoke.sh
 ## 2. Supabase Auth settings (dashboard > Authentication)
 
 - URL configuration: Site URL `http://localhost:5173`; Redirect URLs add `http://localhost:5173/**` and `https://*.vercel.app/**` (add the production domain later).
-- Providers > Email: keep **Disable new user signups = ON** (invite-only). Magic link and OTP are both used by the Login page.
+- Providers > Email: **Disable new user signups must stay OFF** (signups enabled). The `auth.users` allowlist trigger is the gate for unknown emails; magic link and 6-digit OTP both work.
 - Allowlist is a table, not a dashboard setting. Add a teammate:
   ```sql
   insert into public.allowlist (email, role) values ('name@agnisemi.ai', 'member');

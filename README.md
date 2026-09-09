@@ -40,7 +40,7 @@ Seed migrations are idempotent. To promote a hot meta field, add one migration t
 
 ## Auth
 
-Authentication is magic-link and invite-only: `allowlist` determines access. Add an email with:
+Authentication uses magic links and 6-digit OTPs; `allowlist` determines access. In Supabase Auth, **Disable new user signups must stay OFF** (signups enabled), because the `auth.users` allowlist trigger blocks unknown emails. Add an email with:
 
 ```sql
 insert into public.allowlist (email, role) values ('person@example.com', 'member') on conflict (email) do update set role = excluded.role;

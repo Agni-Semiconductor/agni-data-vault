@@ -23,7 +23,7 @@ export default function MeasurementDetail() {
   const measurement = measurementQuery.data; const sample = sampleQuery.data; const files = filesQuery.data ?? []; const selected = files.find((file) => file.id === selectedId) ?? files.find((file) => file.kind === 'raw_xls' || file.kind === 'raw_csv')
   useEffect(() => { if (sample && measurement) document.title = `${sample.sample_id} · ${measurement.measured_on ?? 'measurement'} · Agni Data Vault` }, [sample, measurement])
   useEffect(() => { let alive = true; setUrl(undefined); if (selected) void getFileUrl(selected).then((next) => { if (alive) setUrl(next) }).catch((reason: unknown) => { if (alive) setError(reason instanceof Error ? reason.message : String(reason)) }); return () => { alive = false } }, [selected])
-  const parsedState = useParsedFile(selected && url ? { url, name: selected.original_name } : null)
+  const parsedState = useParsedFile(selected && url ? { url, name: selected.original_name, key: selected.sha256 ?? selected.id } : null)
   if (measurementQuery.isLoading || fields.isLoading || sampleQuery.isLoading) return <Spinner />
   if (measurementQuery.error || sampleQuery.error || fields.error || filesQuery.error) return <p className="text-red-600">{(measurementQuery.error ?? sampleQuery.error ?? fields.error ?? filesQuery.error)?.message}</p>
   if (!measurement || !sample) return <div><p>Measurement not found.</p><Link className="text-blue-700 underline" to="/samples">Back to samples</Link></div>

@@ -1,3 +1,4 @@
+import type uPlot from 'uplot'
 import type { ParsedFile } from './parseFile'
 
 export type PlotKind = 'dciv' | 'aciv' | 'pund' | 'pulse' | 'cv' | 'board_csv' | 'other'
@@ -28,3 +29,27 @@ export function resolveSeries(parsed: ParsedFile, kind: PlotKind, override?: { x
   return { x, y, ...(y2Label ? { y2 } : {}), labels: { x: xLabel, y: yLabel, ...(y2Label ? { y2: y2Label } : {}) }, log_y: useLog }
 }
 export function decimate(xs: number[], ys: (number | null)[], max = 5000): { x: number[]; y: (number | null)[] } { const step = Math.max(1, Math.ceil(xs.length / max)); return { x: xs.filter((_, i) => i % step === 0), y: ys.filter((_, i) => i % step === 0) } }
+const finite = (values: (number | null)[]) => values.filter((value): value is number => value !== null && Number.isFinite(value))
+const extent = (values: number[]): [number, number] => { let lo = Infinity; let hi = -Infinity; for (const value of values) { if (value < lo) lo = value; if (value > hi) hi = value } return [lo, hi] }
+const padded = (lo: number, hi: number): [number, number] => { const pad = (hi - lo) * .02 || Math.abs(lo) * .02 || 1; return [lo - pad, hi + pad] }
+/** Renders tiny/huge magnitudes as 1e-9 style, decade-only labels on log scales, plain fixed otherwise. */
+export function fmtSci(value: number, logScale = false): string {
+  if (!Number.isFinite(value)) return ''
+  if (logScale) { if (!(value > 0)) return ''; const exponent = Math.log10(value); if (Math.abs(exponent - Math.round(exponent)) > 1e-6) return '' }
+  const magnitude = Math.abs(value)
+  if (magnitude !== 0 && (magnitude < 1e-2 || magnitude >= 1e4)) return value.toExponential(0)
+  return String(parseFloat(value.toFixed(2)))
+}
+export const fmtNum = (value: number) => Number.isFinite(value) ? String(parseFloat(value.toFixed(2))) : ''
+export function buildUplotData(series: ResolvedSeries): { data: uPlot.AlignedData; xRange: [number, number]; yRange: [number, number] } {
+  const data: uPlot.AlignedData = series.y2 ? [series.x, series.y, series.y2] : [series.x, series.y]
+  const xs = finite(series.x); const ys = finite(series.y)
+  const xRange = xs.length ? padded(...extent(xs)) : [0, 1] as [number, number]
+  let yRange: [number, number]
+  if (series.log_y) {
+    const positives = ys.filter((value) => value > 0)
+    if (!positives.length) yRange = [1e-12, 1]
+    else { const [lo, hi] = extent(positives); yRange = hi > lo ? [lo, hi * 1.02] : [lo / 10, lo * 10] }
+  } else yRange = ys.length ? padded(...extent(ys)) : [0, 1]
+  return { data, xRange, yRange }
+}

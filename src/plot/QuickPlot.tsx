@@ -11,7 +11,8 @@ const Y_COLOR = '#F15A2A'
 const Y2_COLOR = '#E0B400'
 const xUnit = (name: string) => /^(t|time)$/i.test(name) ? 's' : /charge/i.test(name) ? 'C' : /v/i.test(name) ? 'V' : ''
 
-export function QuickPlot({ parsed, kind: givenKind, height = 320, className }: { parsed: ParsedFile; kind?: PlotKind; height?: number; className?: string }) {
+export function QuickPlot({ parsed, kind: givenKind, height: givenHeight, className, compact = false }: { parsed: ParsedFile; kind?: PlotKind; height?: number; className?: string; compact?: boolean }) {
+  const height = givenHeight ?? (compact ? 200 : 320)
   const [kind, setKind] = useState<PlotKind>(givenKind ?? parsed.detected_kind ?? 'other'); const [x, setX] = useState<string>(); const [y, setY] = useState<string>(); const [y2, setY2] = useState<string>(); const [log, setLog] = useState(Boolean(PROFILES[kind].log_y)); const [hover, setHover] = useState<{ x: number; y: number | null }>(); const host = useRef<HTMLDivElement>(null); const chart = useRef<uPlot | null>(null)
   const series = useMemo(() => resolveSeries(parsed, kind, { x, y, y2, log }), [parsed, kind, x, y, y2, log])
   const built = useMemo(() => { const primary = decimate(series.x, series.y); const reduced: ResolvedSeries = series.y2 ? { ...series, x: primary.x, y: primary.y, y2: decimate(series.x, series.y2).y } : { ...series, x: primary.x, y: primary.y }; return buildUplotData(reduced) }, [series])
@@ -45,7 +46,7 @@ export function QuickPlot({ parsed, kind: givenKind, height = 320, className }: 
   if (!series.x.length) return <p className="text-sm text-agni-slate">No numeric series could be resolved from this file.</p>
   const options = parsed.headers.map((value) => ({ value, label: value }))
   return <div className={clsx('space-y-2', className)}>
-    <div className="flex flex-wrap items-center gap-2 mb-2">
+    {!compact && <div className="flex flex-wrap items-center gap-2 mb-2">
       <Select label="Kind" value={kind} onChange={(event) => setKind(event.target.value as PlotKind)} options={Object.keys(PROFILES).map((value) => ({ value, label: value }))} />
       <Select label="X" value={series.labels.x} onChange={(event) => setX(event.target.value)} options={options} />
       <Select label="Y" value={series.labels.y} onChange={(event) => setY(event.target.value)} options={options} />
@@ -53,13 +54,13 @@ export function QuickPlot({ parsed, kind: givenKind, height = 320, className }: 
       <Button type="button" variant="secondary" onClick={() => setLog((value) => !value)}>{log ? 'Log Y' : 'Linear Y'}</Button>
       <Badge tone={series.log_y && log ? 'amber' : 'blue'}>{caption}</Badge>
       {series.x.length > 5000 && <Badge tone="amber">decimated</Badge>}
-    </div>
+    </div>}
     <div ref={host} className="relative overflow-hidden" style={{ height }} />
-    <div className="flex flex-wrap gap-4 text-xs text-agni-slate">
+    {compact ? <p className="text-[11px] text-agni-slate">{kind} · {log && series.log_y ? `|${series.labels.y}| log` : `${series.labels.y} vs ${series.labels.x}`}</p> : <div className="flex flex-wrap gap-4 text-xs text-agni-slate">
       <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm" style={{ background: Y_COLOR }} />{series.labels.y}</span>
       {series.y2 && <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm" style={{ background: Y2_COLOR }} />{series.labels.y2}</span>}
       <span>{caption}</span>
       {hover && Number.isFinite(hover.x) && <span>x {fmtSci(hover.x)} · y {hover.y === null ? '—' : fmtSci(hover.y, log && series.log_y)}</span>}
-    </div>
+    </div>}
   </div>
 }

@@ -1,1 +1,11 @@
 @import "tailwindcss";
+
+@theme {
+  --color-agni-orange: #F15A2A; --color-agni-orange-hover: #D94A1C; --color-agni-orange-tint: #FFF4E8; --color-agni-gold: #FADA3E; --color-agni-gold-pale: #FFED99; --color-agni-crimson: #95001A; --color-agni-slate: #888894; --color-agni-ink: #000000; --color-border-subtle: #E8E8EC; --color-surface-highlight: #FDF3D2; --color-surface-accent: #FFF4E8; --color-surface-2: #F7F7F8;
+  --font-display: Cabin, sans-serif; --font-body: "IBM Plex Sans", sans-serif; --font-mono: "IBM Plex Mono", monospace;
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --shadow-card: 0 1px 3px rgba(0,0,0,.06); --shadow-overlay: 0 8px 24px rgba(0,0,0,.12);
+}
+:root { color-scheme: light; --agni-orange:#F15A2A; --agni-orange-hover:#D94A1C; --agni-orange-tint:#FFF4E8; --agni-gold:#FADA3E; --agni-gold-pale:#FFED99; --agni-crimson:#95001A; --agni-slate:#888894; --agni-ink:#000; --agni-white:#FFF; --border-subtle:#E8E8EC; --surface-highlight:#FDF3D2; --surface-accent:#FFF4E8; --surface-2:#F7F7F8; --text-heading:var(--agni-crimson); --text-body:var(--agni-ink); --text-muted:var(--agni-slate); --action-primary:var(--agni-orange) }
+body { background:#fff; color:var(--text-body); font-family:var(--font-body); font-size:14px; line-height:1.5 }
+h1,h2,h3 { font-family:var(--font-display); color:var(--text-heading); font-weight:600; letter-spacing:-.01em }
+.label-caps { text-transform:uppercase; letter-spacing:.12em; font-size:12px; color:var(--text-muted) }.num { font-family:var(--font-mono); font-variant-numeric:tabular-nums } :focus-visible { outline:none; box-shadow:0 0 0 3px rgba(241,90,42,.28) } button,a { transition:color .15s ease-out,background-color .15s ease-out,border-color .15s ease-out }

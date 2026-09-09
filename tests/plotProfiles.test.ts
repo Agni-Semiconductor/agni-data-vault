@@ -7,6 +7,10 @@ describe('plot profiles', () => {
   it('detects board headers', () => expect(detectKind(['v_applied'], 'x')).toBe('board_csv'))
   it('detects PUND headers', () => expect(detectKind(['Psw', 'Qsw'], 'x')).toBe('pund'))
   it('detects AC headers', () => expect(detectKind(['Vforce', 'Imeas'], 'x')).toBe('aciv'))
+  it('does not select Charge as the default AC-IV secondary series', () => {
+    const s = resolveSeries(parsed(['Vforce', 'Imeas', 'Charge'], [[0, 1, 2]]), 'aciv')
+    expect(s.y2).toBeUndefined()
+  })
   it('detects pulse headers', () => expect(detectKind(['t', 'V', 'I'], 'x')).toBe('pulse'))
   it('uses absolute dciv current and drops invalid points', () => { const s = resolveSeries(parsed(['AV', 'AI', 'BI'], [[0, -2, 3], ['bad', 1, 2], [1, null, 2]]), 'dciv'); expect(s.x).toEqual([0]); expect(s.y).toEqual([2]) })
   it('picks lower noise DCIV channel', () => expect(pickDcivChannel(parsed(['AI', 'BI'], [[10, 1], [20, 1], [30, 1]])).toString()).toBe('BI'))

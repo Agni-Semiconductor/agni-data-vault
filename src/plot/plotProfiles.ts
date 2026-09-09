@@ -4,7 +4,7 @@ import type { ParsedFile } from './parseFile'
 export type PlotKind = 'dciv' | 'aciv' | 'pund' | 'pulse' | 'cv' | 'board_csv' | 'other'
 export type PlotProfile = { x: string[]; y: string[]; y2?: string[]; abs_y?: boolean; log_y?: boolean }
 export const PROFILES: Record<PlotKind, PlotProfile> = {
-  dciv: { x: ['AV', 'BV'], y: ['AI', 'BI'], abs_y: true, log_y: true }, aciv: { x: ['Vforce'], y: ['Imeas'], y2: ['Charge'] }, pund: { x: ['Time', 't'], y: ['V'], y2: ['I', 'Psw', 'Qsw'] }, pulse: { x: ['t', 'Time'], y: ['V'], y2: ['I'] }, cv: { x: ['V'], y: ['C'] }, board_csv: { x: ['v_applied'], y: ['i_a', 'current_mA'], y2: ['v_meas'], abs_y: true, log_y: true }, other: { x: [], y: [] },
+  dciv: { x: ['AV', 'BV'], y: ['AI', 'BI'], abs_y: true, log_y: true }, aciv: { x: ['Vforce'], y: ['Imeas'] }, pund: { x: ['Time', 't'], y: ['V'], y2: ['I', 'Psw', 'Qsw'] }, pulse: { x: ['t', 'Time'], y: ['V'], y2: ['I'] }, cv: { x: ['V'], y: ['C'] }, board_csv: { x: ['v_applied'], y: ['i_a', 'current_mA'], y2: ['v_meas'], abs_y: true, log_y: true }, other: { x: [], y: [] },
 }
 const has = (headers: string[], value: string) => headers.some((header) => header.toLowerCase() === value.toLowerCase())
 export function detectKind(headers: string[], filename: string): PlotKind {

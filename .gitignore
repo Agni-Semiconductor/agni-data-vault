@@ -1,0 +1,13 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+.vercel
+.model-manager/**/out
+*.log
+.DS_Store
+supabase/.temp
+__pycache__
+.venv
+.model-manager/

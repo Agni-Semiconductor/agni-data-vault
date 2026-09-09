@@ -1,0 +1,5 @@
+import { forwardRef, type ButtonHTMLAttributes } from 'react'
+import clsx from 'clsx'
+import { Spinner } from './Spinner'
+export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> { variant?: 'primary'|'secondary'|'ghost'|'danger'; size?: 'sm'|'md'; loading?: boolean }
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({ className, variant = 'primary', size = 'md', loading = false, disabled, children, ...props }, ref) { return <button ref={ref} disabled={disabled || loading} className={clsx('inline-flex items-center justify-center gap-2 rounded-md font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60', size === 'sm' ? 'px-3 py-1.5 text-sm' : 'px-4 py-2 text-sm', { primary: 'bg-blue-600 text-white hover:bg-blue-700', secondary: 'border border-gray-300 bg-white text-gray-800 hover:bg-gray-50', ghost: 'text-gray-700 hover:bg-gray-100', danger: 'bg-red-600 text-white hover:bg-red-700' }[variant], className)} {...props}>{loading && <Spinner size="sm" />}{children}</button> })

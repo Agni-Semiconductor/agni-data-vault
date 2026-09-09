@@ -1,0 +1,4 @@
+import { forwardRef, type SelectHTMLAttributes } from 'react'
+import clsx from 'clsx'
+export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> { label?: string; options: { value: string; label: string }[]; placeholder?: string }
+export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select({ label, options, placeholder, className, id, ...props }, ref) { const selectId = id ?? label?.toLowerCase().replace(/\s+/g, '-'); return <label className="block text-sm font-medium text-gray-700" htmlFor={selectId}>{label && <span className="mb-1 block">{label}</span>}<select ref={ref} id={selectId} className={clsx('block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500', className)} {...props}>{placeholder && <option value="">{placeholder}</option>}{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label> })

@@ -1,0 +1,6 @@
+import { NavLink, Link, Outlet } from 'react-router-dom'
+import clsx from 'clsx'
+import { Button } from './ui'
+import { useAuth } from '../auth/AuthProvider'
+const links = [{ to: '/', label: 'Dashboard', end: true }, { to: '/samples', label: 'Samples' }, { to: '/admin/fields', label: 'Admin: Fields' }, { to: '/admin/vocab', label: 'Vocabularies' }]
+export default function Layout() { const { user, signOut } = useAuth(); return <div className="min-h-screen bg-gray-50"><header className="border-b border-gray-200 bg-white"><div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-3 p-4"><Link to="/" className="font-semibold text-gray-900">Agni Data Vault</Link><nav className="flex flex-1 flex-wrap gap-1">{links.map((link) => <NavLink key={link.to} to={link.to} end={link.end} className={({ isActive }) => clsx('rounded px-3 py-1.5 text-sm', isActive ? 'bg-blue-50 font-medium text-blue-700' : 'text-gray-600 hover:bg-gray-100')}>{link.label}</NavLink>)}</nav><div className="flex items-center gap-3 text-sm text-gray-600"><span className="max-w-48 truncate">{user?.email}</span><Button variant="secondary" size="sm" onClick={() => void signOut()}>Sign out</Button></div></div></header><main className="mx-auto max-w-7xl p-4"><Outlet /></main></div> }

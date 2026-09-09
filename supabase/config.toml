@@ -1,0 +1,23 @@
+project_id = "agni-data-vault"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+
+[db]
+port = 54322
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["https://*.vercel.app"]
+
+[auth.email]
+enable_signup = false
+enable_confirmations = false

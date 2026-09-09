@@ -19,7 +19,7 @@ const stored = <T extends string>(key: string, fallback: T): T => { try { return
 export default function SampleDetail() {
   const { sampleId = '' } = useParams(); const navigate = useNavigate(); const client = useQueryClient(); const { user } = useAuth(); const [search, setSearch] = useSearchParams()
   const [edit, setEdit] = useState(false); const [add, setAdd] = useState(false); const [formError, setFormError] = useState(''); const [sorting, setSorting] = useState<SortingState>([])
-  const [view, setView] = useState<ViewMode>(() => stored('vault.sample.view', 'table')); const [previewMode, setPreviewMode] = useState<PreviewMode>(() => stored('vault.sample.previewMode', 'plot')); const [loadAll, setLoadAll] = useState(false)
+  const [view, setView] = useState<ViewMode>(() => stored('vault.sample.view', 'preview')); const [previewMode, setPreviewMode] = useState<PreviewMode>(() => stored('vault.sample.previewMode', 'plot')); const [loadAll, setLoadAll] = useState(false)
   const sampleQuery = useQuery({ queryKey: ['sample', sampleId], queryFn: () => getSample(sampleId), enabled: Boolean(sampleId) })
   const sampleFields = useFieldDefs('sample', { includeInactive: true }); const measurementFields = useFieldDefs('measurement')
   const filters = useMemo(() => filtersFromSearchParams(search, measurementFields.defs), [search, measurementFields.defs])

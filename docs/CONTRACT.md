@@ -512,3 +512,106 @@ changes the day someone bumps the extractor. Same rule `0111` applies to
 **Vector export (SVG/PDF) is an open decision** (server-side matplotlib vs a client-side SVG
 renderer) and is therefore not specified here. `exportPng.ts` remains the only export path
 until that call is made. A worker must not pick one.
+
+
+## v2.13 Cohorts (new section — E5)
+
+Migration `0113` adds cohorts: grouping and correlation over the metrics `0111` defines. The SQL
+aggregate is the easy half. **Everything this section specifies is about not producing a
+confident wrong answer**, and none of it is optional.
+
+### The three numbers every cohort panel must render
+
+1. **`n` per group.** A cohort of 3 and a cohort of 400 must never render alike.
+2. **The exclusion count, with its reason.** `vault.cohort_summary` returns a ledger that
+   balances: `n_members = n_with_metric + n_no_metric_row + n_refused`. A caller must be able to
+   account for every member. The difference that matters is between *"the median on/off for 20 nm
+   is 12.5"* and *"the median on/off for 20 nm is 12.5 over 31 of 44 devices — 9 had no metric
+   computed and 4 sat at current compliance"*.
+3. **The provenance of the GROUPING KEY.** This is the one that bites. The metric can be
+   impeccable while the thing you grouped *by* was assumed — and then you have correlated on/off
+   ratio against somebody's guess about FE thickness. Every group reports
+   `status_confirmed` / `status_assumed` / `status_unknown` / `status_unspecified`.
+
+**A cohort panel that omits any of the three is incomplete, not merely terse.** No worker may
+drop them for layout reasons; move them, shrink them, put them behind a disclosure — but they
+render.
+
+### `unspecified` is a fourth bucket, deliberately
+
+`meta_status` is `{key: confirmed|assumed|unknown}` and a key can be **absent** while the value is
+present. `EntityForm` defaults an absent status to `'confirmed'`, but that is a default for a
+*form field*, not a claim about data. Folding absent into `confirmed` would inflate confidence
+for exactly the rows written by tooling that never set a status (`cli/vault.py`,
+`cli/backfill.py`, any direct API write); folding it into `unknown` would contradict the editor.
+So it is counted and reported separately, and the UI must not merge it into either.
+
+(The E1 upload path is already clean here: `uploads.js` writes a value **only** for confirmed
+fields, and a queued field gets no value and no status — so an uncertain extraction is absent,
+never mislabelled.)
+
+### Never silently drop a non-confirmed value
+
+Either include it and mark it, or exclude it and say how many. Both are defensible; a silent drop
+is not, because the reader cannot tell it happened.
+
+### What may be grouped by, and what may be measured
+
+Two **migration-authored allow-lists**, not free-form input:
+
+- `vault.cohort_group_keys` — 14 keys spanning geometry (`pad_area_um2`, `pad_dim_um`,
+  `pad_shape`), conditions (`temperature_c`), stack (`stack_fe_material`, `stack_fe_t_nm`) and
+  origin (`fab_location`, `fabricated_by`, `family`, `substrate`). Each carries the
+  `field_definitions` key whose `meta_status` describes its provenance — `pad_area_um2` is
+  GENERATED from `pad_dim_um`, so it inherits that field's provenance rather than having its own.
+  A null `status_key` means the value is structural: `kind` comes from the file, so there is no
+  human assertion to be unsure about, and every member reports `unspecified`.
+- `vault.metric_definitions` — the metric columns of `measurement_metrics` with their units and
+  log-scale flags, so a cohort axis is labelled from the registry rather than a fifth copy of the
+  units fact.
+
+**`cohort_group_keys.sql_expr` is executable code.** It is interpolated into a query by
+`cohort_summary`, and the table is therefore **SELECT-only for every role including
+`vault_service`** — enforced by an explicit `REVOKE`, because `0102`'s `alter default privileges`
+hands the service role write access on every table created in this schema. Adding a group key is
+a migration. **No API route may write either registry.**
+
+### The aggregate, and where the predicate is evaluated
+
+`vault.cohort_summary(p_measurement_ids uuid[], p_metric text, p_group_by text,
+p_extractor_version text)` takes an **explicit membership list**. The API resolves membership
+using its existing, injection-hardened filter path (`api/_lib/query.js`) and passes ids; SQL
+aggregates. Evaluating an arbitrary user predicate in SQL would mean building a query engine out
+of jsonb, and the interesting failure of a hand-written query engine is that it runs as a
+`BYPASSRLS` role.
+
+An unknown metric or group key **raises**; it does not return an empty result. An empty chart and
+a misspelled field are different problems and must not look the same.
+
+One measurement with several metric rows (several files) counts **once** — `distinct on` picks the
+newest. A measurement is a device, not a row count.
+
+### New routes
+
+| Method | Path | Query / body | Returns |
+|---|---|---|---|
+| GET | `/api/cohort-keys` | — | `{group_keys:[{key,label,entity,status_key,value_kind,unit,notes}], metrics:[{metric,label,unit,log_scale,notes}]}` |
+| GET/POST | `/api/cohorts` | GET `q, sort, order, limit<=200 (default 50), offset`; POST `{name, predicate, metric?, group_by?, description?, slug?, extractor_version?}` | `{items,total}` / 201 `{cohort}` |
+| GET/PATCH/DELETE | `/api/cohorts/:id` | `:id` = uuid **or** `slug` | `{cohort}` / `{deleted}` |
+| POST | `/api/cohorts/summary` | `{predicate, metric, group_by, extractor_version?}` — or `{cohort_id}` to run a saved one | `{groups:[…cohort_summary rows…], total_members, excluded}` |
+
+`/api/cohort-keys` is **read-only**, guarded the same way `/api/kinds` is: the router refuses
+every non-GET and the resource exports no mutation handler. `sql_expr` is **never** included in
+the response — it is server-side implementation, and a client that saw it would be a client
+tempted to send one.
+
+`POST /api/cohorts/summary` is a POST because it carries a predicate, not because it writes.
+`VAULT_READONLY=1` must **not** reject it; that flag gates writes, and refusing analysis in a
+read-only shakedown deploy would make the flag untestable against real data.
+
+### Not in this section
+
+**No regression fit, no confidence band.** The continuous-correlation view needs one, and picking
+a fit (OLS on raw values? on log10 of a log-scale metric? weighted by n?) is a statistics
+decision with a right answer per metric, not a worker's call. `cohort_summary` returns the
+distribution per group; the fit is specified separately once that choice is made.

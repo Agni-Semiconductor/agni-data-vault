@@ -344,7 +344,7 @@ New routes to fill gaps the browser used to cover client-side:
 - Numeric `meta` range filtering moves **server-side** into `api/_lib/query.js`. The v1 client-side `metaRange` branch
   silently ignored DB pagination.
 
-Routes add `/bench` (see v2.8) and `/figures/:id` is reserved for Part 2.
+Routes add `/bench` (see v2.8); `/figures` and `/kinds` are specified in v2.12.
 
 ## v2.8 The bench schema (new section)
 
@@ -437,3 +437,72 @@ A rejected Cloudflare Access assertion is always a bare `unauthorized` to the cl
 reason is logged server-side only. Without that log, "expired", "wrong audience" and "the
 JWKS endpoint is unreachable" are one indistinguishable 401 — and the third is an outage,
 not a rejected user.
+
+
+## v2.12 Units, and the figure builder (new section — E7)
+
+Migration `0112` makes units **data**. Three code sites used to carry the same fact —
+`src/plot/plotProfiles.ts`'s `PROFILES`, the bench's `campaign_log.COLUMN_UNITS`, and
+`fed_viewer`'s own column lists — and three copies of one fact is how a unit mismatch happens.
+
+**Units are per COLUMN, never per axis.** The bench emits both `i_a` (amperes) and
+`current_mA` (milliamperes) for the same physical quantity; `campaign_log.py` calls the latter
+"the cautionary tale of a unit that lives only inside a column name". `vault.column_units` is
+authoritative. `measurement_kinds.x_unit`/`y_unit`/`y2_unit` are a panel **default**, valid
+only when every candidate column on that axis agrees — a database trigger enforces that, and
+`board_csv.y_unit` is therefore **null**, because `y_col` is `{i_a, current_mA}`.
+
+### The refusal rule, which is not negotiable
+
+**A trace whose unit cannot be converted to its panel's unit is REFUSED, not coerced, and the
+panel says so.** Overlaying milliamperes on an ampere axis draws a 1000× error that looks like
+real data on a log scale — no gap, no exception, just a curve three decades high. The same
+applies to area normalisation: a measurement with **no** `pad_area_um2` must fail that trace,
+never quietly emit A/cm² that are really amperes.
+
+- A convertible unit is converted, and the factor applied is recorded in the rendered trace.
+- An inconvertible unit (different quantity) is refused with a message naming both units.
+- An **unregistered** column — `vault.column_unit()` returns null — is treated as unknown and
+  therefore refused. It is never assumed to match the axis default. `vault.units_compatible()`
+  is the check to make before rendering; `vault.unit_factor()` deliberately **raises**.
+
+### New routes
+
+| Method | Path | Query / body | Returns |
+|---|---|---|---|
+| GET | `/api/kinds` | — | `{items:[{kind,label,x_col[],y_col[],y2_col[],x_unit,y_unit,y2_unit,abs_y,log_y,derivable[],notes}],units:[{unit,quantity,si_factor,label}],column_units:[{column_name,unit,notes}]}` |
+| GET/POST | `/api/figures` | GET `q, created_by, sort, order, limit<=200 (default 50), offset`; POST `{title, spec, description?, slug?, pinned_extractor_version?}` | `{items,total}` / 201 `{figure}` |
+| GET/PATCH/DELETE | `/api/figures/:id` | `:id` = uuid **or** `slug`; PATCH partial | `{figure, sources:[...]}` / `{deleted}` |
+
+`GET /api/figures/:id` returns `sources` from `vault.figure_sources`, so the client can report
+**"3 of 4 traces resolved"** rather than drawing three and looking like a plotting bug. A
+dangling reference is a fact to display, not an error to swallow.
+
+`GET /api/kinds` is what makes `PROFILES` a *projection*. After E7, `plotProfiles.ts` must not
+contain a hard-coded axis or unit literal; `detectKind`'s filename heuristics stay client-side
+because they read a filename, not the database.
+
+### The figure spec
+
+`spec` is `jsonb` and **forward-compatible by rule**: unknown panel and trace keys are
+retained, never stripped, exactly as `device_tests.metrics` keeps unknown keys — the client and
+the server deploy separately. Only two things are structural, enforced by CHECK constraints:
+`spec.panels` is an array, and it is not empty.
+
+```
+{ layout: '2x2',
+  panels: [ { y_scale: 'log', unit: 'A', annotations: [],
+              traces: [ { src: {file_id}    , x: 'AV'       , y: 'AI' , transform: ['abs'], label: '20nm RT' },
+                        { src: {capture_id} , x: 'v_applied', y: 'i_a', transform: ['abs'], label: 'board'   } ] } ] }
+```
+
+`pinned_extractor_version` is null for a figure over raw file columns — it *should* follow the
+data — and **must** be set for a figure over derived metrics, or the figure in a paper silently
+changes the day someone bumps the extractor. Same rule `0111` applies to
+`measurement_metrics` rows.
+
+### Not in this section, deliberately
+
+**Vector export (SVG/PDF) is an open decision** (server-side matplotlib vs a client-side SVG
+renderer) and is therefore not specified here. `exportPng.ts` remains the only export path
+until that call is made. A worker must not pick one.

@@ -196,6 +196,89 @@ rather than overwriting — so a published figure cannot silently change under a
 ratio and a ratio of zero are different findings; conflating them corrupts every downstream
 histogram. Same rule for `ec_minus` (1,200 empty).
 
+### The vault's own metrics, and why they import the bench's physics
+
+The bench half above covers campaign runs. The vault's ~2,106 Clarius workbooks had no
+computed metrics at all — no on/off, no coercive voltage, no Pr — which is what blocked
+"correlate by device size" and everything else in Part 2. `vault.measurement_metrics` (0111)
+holds them, filled by `tools/vault_metrics.py` on the `fedbench-vault-metrics` timer, hourly.
+
+**That worker IMPORTS `campaign_analysis.analyse_dc`/`analyse_ac` rather than reimplementing
+them.** This is the load-bearing decision in E3 and it is not about saving effort. Those
+functions are not naive: `onoff` is the paired right-half ratio between the OFF branch
+(0 → +Vmax) and the ON branch (+Vmax → 0), they *refuse* a sweep pinned at current compliance
+(on a real array a cell that hit compliance partway scored 827× where its neighbours sat near
+4×), `ec_plus` is the retrace voltage where the branches rejoin rather than a current peak, and
+AC-IV takes the **median** across drive cycles. Two implementations of one metric name is
+exactly how a cohort comparison ends up correlating two different quantities and returning a
+confident wrong answer. **Verified**: `campaign_analysis` imports with only `tools/` on
+`sys.path`, which is what the systemd unit provides — so the unit deliberately sets no
+`PYTHONPATH`, because a second way for that import to resolve is a second thing to get wrong.
+
+`tools/vault_metrics.py` is the **first** script in `tools/` that is not stdlib-only: reading a
+Clarius `.xlsx` needs `openpyxl`, and the unit runs `/usr/bin/python3`. `dnf install
+python3-openpyxl` on edaserver, or the timer fails as a `ModuleNotFoundError` in the journal
+that reads like a broken script rather than an unfinished install.
+
+**Verified about the adapter** (26 tests, `server/tests/test_vault_metrics.py`):
+
+- **`|value| >= 1e22` is Clarius's unmeasured sentinel and never reaches the physics.** The
+  test asserts on the arguments *captured from the analyse_dc call*, not merely that nothing
+  crashed — a 7e22 surviving as a float is accepted by the noise-floor calculation and poisons
+  every metric derived from that sweep without failing.
+- **Which of the two current channels was chosen is recorded in `extra`.** A DC-IV export
+  carries AI and BI; the quieter over the first 5% of rows wins. A metric computed from the
+  wrong channel is not reproducible unless you know which one it came from.
+- **`1 um^2 = 1e-8 cm^2`, pinned exactly.** Getting this factor wrong is an eight-orders-of-
+  magnitude error that still looks plausible on a log axis. No pad area yields **no**
+  area-normalised metric and a recorded reason — never a guess.
+- **`skipped` is NULL, never `''`.** Two spellings of "nothing was skipped" is one more than
+  the schema can answer for, and `where skipped is null` is the query everyone writes.
+- **A refused batch retries one row at a time.** A batch POST is a single statement, so one
+  row tripping either partial unique index would take the other ninety-nine with it. Note
+  `on_conflict` is *not* available as a shortcut: it names a constraint, and uniqueness here is
+  carried by two **partial** indexes, which PostgREST cannot target. Hence read-then-insert.
+- **The checkpoint is written after each accepted batch, and after the POST rather than
+  before.** Saving once at the end means a run killed after eight batches records none of
+  them; the state file then exists and buys nothing, which is worse than having none because
+  it reads as resumability. Writing after the POST keeps the failure direction safe — a crash
+  in between costs a repeat, which the anti-join absorbs, rather than marking unwritten rows
+  done. The file lives at `state/vault_metrics.json`, not in `tools/`, so it never shows up as
+  a dirty worktree for whoever next runs `git pull` on the box.
+
+**NOT yet verified, and it needs a real file.** The Clarius-workbook → V/I adapter has only
+ever been exercised against workbooks the tests build with `openpyxl`. No real Clarius
+`.xls`/`.xlsx` is checked into either repo, so the sheet-selection and column-name rules are
+tested against my *model* of the export format, not the format. The vault already has the hook
+for closing this: `tests/realfile.test.ts` is gated on `VAULT_REAL_XLSX` and skipped when
+absent — which is the "1 skipped" in every vault test run. **Point that env var at one real
+`20-DC-1.xlsx` and this stops being an assumption.** Until then, treat the first production
+run as a dry run and read the per-measurement log lines.
+
+### Units are data now, and conversion refuses rather than coerces
+
+`vault.units` and `vault.column_units` (0112) replace what used to be a literal in three
+separate places (`plotProfiles.PROFILES`, the bench's `COLUMN_UNITS`, `fed_viewer`'s own
+lists). Units are recorded **per column**, because the bench emits both `i_a` (amperes) and
+`current_mA` (milliamperes) for the same quantity and `campaign_log.py` calls the latter "the
+cautionary tale of a unit that lives only inside a column name".
+
+`vault.unit_factor('A','V')` **raises**, and that is the design: a null would propagate into a
+plot as a gap and into an average as a silently smaller n, both indistinguishable from missing
+data. A caller that must degrade gracefully asks `units_compatible()` first.
+
+This also **corrected a defect in 0111**, which declared one `y_unit` per kind while `y_col` is
+a fallback *list* — so `board_csv`'s `{i_a, current_mA}` sat under a single label of `'A'`. A
+capture carrying only the legacy column would have been labelled amperes: 1000× high, on a log
+axis, looking like data. The axis unit is now a panel **default**, valid only when every column
+on that axis agrees, and a trigger enforces that. **Verified**: re-declaring `board_csv`'s
+`y_unit` and inserting a new mixed-unit kind are both refused, naming `{A,mA}`.
+
+The frontend consequence has **not** landed yet: `PROFILES` is still a hard-coded literal in
+`src/plot/plotProfiles.ts` and must become a projection of `measurement_kinds` +
+`column_units`, or the two can still disagree. That is E7's first task, not this document's
+claim.
+
 ---
 
 ## 6. Dual-write is transitional

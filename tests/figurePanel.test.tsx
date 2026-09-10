@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-vi.mock('uplot', () => ({ default: Object.assign(function uPlot() {}, { paths: { linear: () => () => undefined } }) }))
-import { buildPanelData, conversionBadgeText, decimationBadgeText, refusalText } from '../src/plot/FigurePanel'
+import { describe, expect, it } from 'vitest'
+import { buildPanelData, conversionBadgeText, decimationBadgeText, refusalText } from '../src/plot/panelData'
 import type { ResolvedPanel, ResolvedTrace } from '../src/plot/resolveTraces'
 
 const trace = (overrides: Partial<ResolvedTrace> = {}): ResolvedTrace => ({ x: [0, 2], y: [1, null], label: 'current_mA', unit: 'A', factor: 1e-3, points: 6000, decimated: true, ...overrides })

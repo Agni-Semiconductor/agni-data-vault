@@ -319,6 +319,83 @@ but tedious. Its right home is the measurement page ("add this file to a figure"
 is already looking at the file), and a picker that only searched samples would miss bench
 captures, which the spec supports.
 
+## 5c. Cohorts, and the three numbers that make a grouping mean something
+
+`0113` adds cohorts: grouping and correlation over the metrics `0111` defines. The SQL aggregate
+was the easy half. Everything else is about not producing a confident wrong answer, and the API
+and UI are held to it by contract v2.13:
+
+1. **`n` per group.** A cohort of 3 and a cohort of 400 must never render alike — the chart
+   hatches a box below n = 5 so its evidence *looks* different rather than merely reporting a
+   small number in small type. Two boxes drawn from 2 and 400 points are otherwise the same
+   shape, which is the single most misleading thing this chart could do.
+2. **A ledger that balances**: `n_members = n_with_metric + n_no_metric_row + n_refused`. The UI
+   asserts it and says so in red if it fails, because an unbalanced ledger means the API and the
+   database disagree. The difference this buys is between *"the median on/off for 20 nm is
+   12.5"* and *"12.5 over 31 of 44 devices — 9 had no metric computed and 4 sat at current
+   compliance"*.
+3. **The provenance of the grouping key.** The metric can be impeccable while the thing you
+   grouped *by* was assumed, and then you have correlated on/off ratio against somebody's guess
+   about FE thickness. The bench already learned the general form: the rows were right and
+   everything describing them was wrong.
+
+**`unspecified` is a fourth provenance bucket on purpose.** `meta_status` can be *absent* while
+the value is present. `EntityForm` defaults absent to `'confirmed'`, but that is a default for a
+*form field*, not a claim about data — folding it into `confirmed` here would inflate confidence
+for exactly the rows written by tooling that never set a status (`cli/vault.py`,
+`cli/backfill.py`, any direct API write), and folding it into `unknown` would contradict the
+editor. E1's upload path is already clean about this: `uploads.js` writes a value **only** for
+confirmed fields, so an uncertain extraction is absent, never mislabelled.
+
+**Verified** on the validation database with a deliberately messy population: the ledger balances
+for every group; the 20 nm cohort reports 3 confirmed + 1 assumed while the 45 nm cohort reports
+3 *unspecified*; a wrong `extractor_version` returns `n_members` intact with `n_with_metric = 0`
+rather than an empty result set, which would have been indistinguishable from "no such cohort";
+one measurement carrying two metric rows counts **once**; and `'0; drop table vault.samples'` as
+a group key raises `unknown group key`.
+
+### Two things the probe caught that would have shipped with a comment claiming the opposite
+
+**`cohort_group_keys.sql_expr` is executable SQL**, interpolated into a query by
+`cohort_summary`. The migration granted SELECT only and said the API therefore could not write
+it. It could: `0102` runs `alter default privileges in schema vault grant select, insert, update,
+delete on tables to vault_service`, so **every table created in this schema is writable by the
+service role before any grant in a later migration runs**. Verified `insert = true` with the
+narrow grant in place. Fixed with an explicit `REVOKE` — anyone adding another read-only table to
+this schema needs the same, and this is the one to remember from the whole file.
+
+The double-count probe **inserted zero rows**, because the sample it used had no `files` row in a
+fresh database, so it proved nothing about the `distinct on`. It now creates the file first and
+asserts there really are several metric rows before asserting `n_members` is unchanged. A vacuous
+green is worse than a red.
+
+### Membership is resolved in full, or refused
+
+`vault.cohort_summary` takes an **explicit measurement id list**. The API resolves the predicate
+with its existing injection-hardened filter path and keyset-pages the whole population;
+`parsePagination` defaults to 50, and a median over an arbitrary 50 measurements looks entirely
+correct. Above 50,000 it **refuses** rather than truncating, for the same reason.
+
+Evaluating the predicate in SQL was rejected: an arbitrary jsonb predicate means writing a query
+engine, and the interesting failure of a hand-written query engine is that it runs as a
+`BYPASSRLS` role.
+
+### `POST /api/cohorts/summary` and the read-only flag
+
+`api/handler.js` rejects every POST/PUT/PATCH/DELETE under `VAULT_READONLY=1` **before** the
+router is reached, so no resource can opt itself out. `READONLY_SAFE_POST` is an **exact-path**
+allow-list on normalised segments: exact, because a prefix match on `cohorts` would also admit
+`POST /api/cohorts`, which creates a row — a fail-closed flag with a prefix hole reads as
+protection while admitting the one verb it was added to stop.
+
+### Not built
+
+**No regression fit and no confidence band.** The continuous-correlation view needs one, and
+choosing it (OLS on raw values? on log10 of a log-scale metric? weighted by n?) is a statistics
+decision with a different right answer per metric — not a worker's call and not mine to guess.
+`cohort_summary` returns the distribution per group; the fit is specified separately once that
+choice is made. **This is one of the open questions for Owen.**
+
 ---
 
 ## 6. Dual-write is transitional

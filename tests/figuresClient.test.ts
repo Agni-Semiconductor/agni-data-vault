@@ -3,6 +3,7 @@ import { createFigure, deleteFigure, getFigure, getKinds, listFigures, updateFig
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { FIGURE_SORT_KEYS, asFigureSortKey } from '../src/lib/figures'
+import { COHORT_SORT_KEYS, asCohortSortKey } from '../src/lib/cohorts'
 
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}})
 const spec:FigureSpec={layout:'1x1',panels:[{unit:'A',traces:[{src:{file_id:'file-1'},x:'voltage',y:'current',label:'device'}]}]}
@@ -45,5 +46,24 @@ describe('the client and the API agree on what is sortable', () => {
     expect(asFigureSortKey('spec')).toBeUndefined()
     expect(asFigureSortKey('id; drop table')).toBeUndefined()
     expect(asFigureSortKey(undefined)).toBeUndefined()
+  })
+})
+
+describe('the cohorts client and API agree on what is sortable too', () => {
+  it('COHORT_SORT_KEYS matches cohorts.js SORT_KEYS exactly', () => {
+    // Same trap as figures: parseSort returns null for an unknown key and the resource falls
+    // back to updated_at desc, so the table shows a sort indicator on a column the server never
+    // sorted by. Read the server's list from source; a restated copy is a third copy.
+    const source = readFileSync(resolve(process.cwd(), 'api/_lib/resources/cohorts.js'), 'utf8')
+    const match = source.match(/const SORT_KEYS = \[([^\]]*)\]/)
+    expect(match, 'SORT_KEYS not found in cohorts.js -- this test pins it, so a rename must fail here').toBeTruthy()
+    const server = match![1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+    expect([...COHORT_SORT_KEYS].sort()).toEqual(server.sort())
+  })
+
+  it('drops an unknown cohort sort key rather than forwarding it', () => {
+    expect(asCohortSortKey('name')).toBe('name')
+    expect(asCohortSortKey('predicate')).toBeUndefined()
+    expect(asCohortSortKey(undefined)).toBeUndefined()
   })
 })

@@ -274,10 +274,50 @@ axis, looking like data. The axis unit is now a panel **default**, valid only wh
 on that axis agrees, and a trigger enforces that. **Verified**: re-declaring `board_csv`'s
 `y_unit` and inserting a new mixed-unit kind are both refused, naming `{A,mA}`.
 
-The frontend consequence has **not** landed yet: `PROFILES` is still a hard-coded literal in
-`src/plot/plotProfiles.ts` and must become a projection of `measurement_kinds` +
-`column_units`, or the two can still disagree. That is E7's first task, not this document's
-claim.
+`PROFILES` is **still a literal** in `src/plot/plotProfiles.ts`, and after building E7 I think
+that is the right answer rather than a deferral. `resolveSeries` is a pure synchronous function a
+chart calls during render; making it await `/api/kinds` would push async through `QuickPlot`,
+`MeasurementCard` and every test above them, to remove a duplication that a test can catch just
+as well. So `tests/kindRegistryParity.test.ts` pins the literal to the migration instead, and
+`GET /api/kinds` serves the registry for the things that genuinely need it at runtime — the
+figure builder's unit resolution and column pickers.
+
+That test earned its place immediately: it found two real drifts on its first run, both mine.
+`res2t` was declared in the registry with no frontend profile at all, so the database offered a
+kind the UI could not plot; and `0111` seeded `aciv.y2_col = '{Charge}'` while
+`tests/plotProfiles.test.ts` already pinned the opposite with *"does not select Charge as the
+default AC-IV secondary series"*. That test encoded a deliberate decision predating the
+migration, so the **migration** was wrong and was corrected.
+
+### What E7 shipped, and what it refuses
+
+`GET /api/kinds` returns `measurement_kinds`, `units` and `column_units` in ONE response,
+fetched concurrently — three requests would let a client render with two of the three loaded,
+resolving a unit against a half-empty registry. It is read-only, guarded twice (the router
+refuses every non-GET and the resource exports no mutation handler): an endpoint that can edit a
+unit is one that can mint a 1000x error at runtime.
+
+`src/plot/units.ts` is the client-side twin of 0112's SQL functions, and `resolvePanel` in
+`src/plot/resolveTraces.ts` merges N traces onto shared axes. **A refused trace goes into
+`refusals` with its reason and contributes nothing to the axis ranges** — never a silent drop,
+because a panel that quietly renders 3 of 4 traces looks like a plotting bug and gets debugged
+for an hour, while one that says "current_mA is mA, panel axis is A" gets fixed in a minute.
+
+Three failure modes stay distinct in the UI, because they have different fixes and the same
+symptom (an absent curve): a source that would not **load**, a trace **refused** on units, and a
+saved reference whose file or capture **no longer exists**. The third comes from
+`vault.figure_sources` — **verified as `vault_service`, the role PostgREST SET ROLEs to**: the
+view resolves cross-schema under `security_invoker` and reports "1 of 2 resolved" for a figure
+naming one real `public.captures` row and one absent capture. The negative case alone would have
+been indistinguishable from a broken subquery, so a real capture was seeded to prove the
+positive.
+
+**Not built, deliberately:** vector export (SVG/PDF) remains an open decision — server-side
+matplotlib versus a client-side renderer — so `exportPng.ts` is still the only export path. And a
+browse-and-pick source selector: a trace's source is entered as a file id today, which is honest
+but tedious. Its right home is the measurement page ("add this file to a figure", where the user
+is already looking at the file), and a picker that only searched samples would miss bench
+captures, which the spec supports.
 
 ---
 

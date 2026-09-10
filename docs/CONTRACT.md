@@ -428,6 +428,12 @@ Added in v2:
   **POST, PUT, PATCH and DELETE**. PUT matters: `PUT /api/files/:id/content` is the upload
   path in v2.6, so omitting it would let a read-only shakedown deploy accept file writes.
 - `payload_too_large` (413) — a JSON body over 10 MB, rejected by the server before parsing.
+- `invalid_spec` (400) — a figure `spec` is structurally wrong (v2.12). Distinct from
+  `validation_failed` on purpose: a client can point at the spec editor rather than a form
+  field. The database enforces the same rule with CHECK constraints, but a 400 naming
+  `spec.panels` beats a 500 carrying a Postgres constraint name.
+- `empty_patch` (400) — a PATCH body with no updatable field. Silently returning 200 for a
+  no-op PATCH hides a client that is sending the wrong key name entirely.
 
 Already in use in v1 but never listed in section 3, recorded here so the vocabulary is
 complete: `server_misconfigured` (500), `storage_error` (500), `not_ready` (409),

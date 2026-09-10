@@ -1,7 +1,7 @@
 import { supabaseAdmin } from '../supabaseAdmin.js';
 import { ApiError, dbError } from '../respond.js';
 import { isUuid, parsePagination, parseSort } from '../validate.js';
-import { applySort } from '../query.js';
+import { applySort, likeTerm } from '../query.js';
 
 const SORT_KEYS = ['title', 'slug', 'created_by', 'created_at', 'updated_at'];
 const WRITE_KEYS = ['title', 'spec', 'description', 'slug', 'pinned_extractor_version'];
@@ -26,7 +26,7 @@ async function resolveFigure(idOrSlug) {
 export async function list(query = {}) {
   let q = supabaseAdmin().from('figures').select('*', { count: 'exact' });
   if (query.created_by) q = q.eq('created_by', query.created_by);
-  if (query.q) q = q.or(`title.ilike.*${query.q}*,description.ilike.*${query.q}*,slug.ilike.*${query.q}*`);
+  if (query.q) { const term = likeTerm(query.q); if (term) q = q.or(`title.ilike.*${term}*,description.ilike.*${term}*,slug.ilike.*${term}*`); }
   q = applySort(q, parseSort(query, SORT_KEYS) || DEFAULT_SORT);
   const { limit, offset } = parsePagination(query); const { data, error, count } = await q.range(offset, offset + limit - 1);
   if (error) throw dbError(error);

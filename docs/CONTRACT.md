@@ -606,8 +606,18 @@ the response — it is server-side implementation, and a client that saw it woul
 tempted to send one.
 
 `POST /api/cohorts/summary` is a POST because it carries a predicate, not because it writes.
-`VAULT_READONLY=1` must **not** reject it; that flag gates writes, and refusing analysis in a
-read-only shakedown deploy would make the flag untestable against real data.
+`VAULT_READONLY=1` must **not** reject it: that flag gates writes, and refusing analysis in a
+read-only shakedown deploy would leave phase 2 unable to exercise the feature it exists to
+exercise.
+
+This needed a change in `api/handler.js`, which rejects every POST/PUT/PATCH/DELETE *before* the
+router is reached — so no resource can opt itself out. `READONLY_SAFE_POST` is an **exact-path**
+allow-list matched on normalised segments. Exact, because a prefix match on `cohorts` would also
+admit `POST /api/cohorts`, which creates a row, and a fail-closed flag with a prefix hole reads as
+protection while admitting the one verb it was added to stop. Normalised segments rather than the
+raw URL, because a raw-string comparison would refuse a legitimate trailing slash while being
+bypassable by anything the router normalises away. **Anything added to that set needs the same
+argument made for it explicitly, in review.**
 
 ### Not in this section
 

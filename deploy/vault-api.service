@@ -1,0 +1,33 @@
+# Agni Vault API systemd unit.
+#
+# Required environment (Contract v2.4): VAULT_REST_URL, VAULT_STORAGE_URL,
+# VAULT_SERVICE_JWT, VAULT_API_KEY, VAULT_IDENTITY_* (Access team domain and
+# application aud), VAULT_ADMIN_BOOTSTRAP, and VAULT_READONLY.
+#
+# RHEL 9 install warning: use `cp`, never `mv`, when installing this unit. A
+# moved file keeps its source SELinux context, and systemd then refuses to load
+# it.
+
+[Unit]
+Description=Agni Vault API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vaultsvc
+Group=vaultsvc
+WorkingDirectory=/srv/vault/app
+# Must be mode 0640 and owned by root:vaultsvc.
+EnvironmentFile=/etc/vault/vault-api.env
+ExecStart=/usr/bin/node /srv/vault/app/server/vault-api.mjs
+Restart=on-failure
+RestartSec=2
+MemoryHigh=512M
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

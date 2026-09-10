@@ -405,6 +405,13 @@ missing panel is indistinguishable from a crash.
 Unchanged: `npm run typecheck`, `npm test`, `npm run lint`, `npm run build`, and the API syntax gate
 `node --check api/handler.js api/_lib/*.js api/_lib/resources/*.js` (now also `server/vault-api.mjs`).
 
+**New gate: `npm run check:api`.** It loads the API's module graph, because neither existing gate
+can. `node --check` is syntax-only and never resolves an import, and `npm test` cannot help either:
+`tests/api-files.test.ts` `vi.mock`s `api/_lib/storage.js` wholesale, so the real module's exports are
+never resolved by any test. On 2026-09-10 all 195 tests passed, typecheck passed and every file passed
+`node --check` while the server could not boot, because three resource modules still imported exports
+that had been deleted. Run this gate before believing the suite.
+
 `scripts/smoke.sh` still walks schema → sample → measurement → upload → register → `include=files` → download →
 delete → verify 404, updated for v2.6's upload flow. **That update is the test of the new flow.**
 

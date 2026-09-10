@@ -171,6 +171,10 @@ grant select on public.campaign_runs, public.device_tests to vault_service, vaul
 -- express the window function that collapses device_tests to the latest attempt per cell.
 -- Its security_invoker = on means it still respects device_tests' RLS.
 grant select on public.device_coverage to vault_service, vault_read;
+-- duts and captures too: the bench viewer lists DUTs and reads a capture's storage_path to
+-- serve its bytes read-through from the bench bucket. Missing these produced
+-- 'permission denied for table duts' at runtime, not at migration time.
+grant select on public.duts, public.captures to vault_service, vault_read;
 -- The analysis tables (ferrodiode-pcb-testbench/server/deploy/migrations/2026-09-10_cell_analysis.sql)
 -- back the histograms and the outcome map. Guarded: this file must still apply against a
 -- cluster where that migration has not run yet.

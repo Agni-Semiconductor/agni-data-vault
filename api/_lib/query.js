@@ -1,14 +1,14 @@
-// JSONB range comparisons use text operators; promote numeric fields for numeric ordering.
+// Keep numeric JSONB scalars as JSONB so PostgreSQL compares their numeric values, not extracted text.
 export function applyEntityFilters(q, entity, query = {}, defs = []) {
   const by = new Map(defs.map((d) => [d.key, d]));
   for (const [key, value] of Object.entries(query)) {
     if (!key.startsWith('meta.')) continue;
-    const [, field, bound] = key.split('.'); const def = by.get(field);
+    const [, field, bound] = key.split('.'); const def = by.get(field); const numeric = ['number', 'integer'].includes(def?.type);
     if (!def) continue;
     if (def.column_name) q = bound === 'min' ? q.gte(def.column_name, value) : bound === 'max' ? q.lte(def.column_name, value) : q.eq(def.column_name, value);
-    else if (bound === 'min') q = q.gte(`meta->>${field}`, value);
-    else if (bound === 'max') q = q.lte(`meta->>${field}`, value);
-    else { let coerced = value; if (['number', 'integer'].includes(def.type)) coerced = Number(value); else if (def.type === 'bool') coerced = value === 'true'; q = q.contains('meta', { [field]: coerced }); }
+    else if (bound === 'min') q = q.gte(`meta${numeric ? '->' : '->>'}${field}`, numeric ? Number(value) : value);
+    else if (bound === 'max') q = q.lte(`meta${numeric ? '->' : '->>'}${field}`, numeric ? Number(value) : value);
+    else { let coerced = value; if (numeric) coerced = Number(value); else if (def.type === 'bool') coerced = value === 'true'; q = q.contains('meta', { [field]: coerced }); }
   }
   if (query.q) q = entity === 'sample' ? q.or(`sample_id.ilike.*${query.q}*,label.ilike.*${query.q}*`) : q.ilike('device_address', `*${query.q}*`);
   if (query.from) q = q.gte('measured_on', query.from);

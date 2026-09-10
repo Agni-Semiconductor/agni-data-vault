@@ -13,6 +13,7 @@ const COLUMN_WHITELIST = {
   measurement: ['measured_on', 'kind', 'instrument', 'probe_station', 'measured_by', 'temperature_c', 'device_address', 'run_numbers', 'pad_shape', 'pad_dim_um', 'pad_area_override', 'notes'],
   file: [],
 };
+async function assertAdmin(principal) { if (principal?.kind !== 'human') return; const { data, error } = await supabaseAdmin().from('people').select('role').eq('email', principal.actor).maybeSingle(); if (error) throw dbError(error); if (data?.role !== 'admin') throw new ApiError(403, 'unauthorized', 'Admin role required'); }
 
 function defErrors(p, { isNew }) {
   const errors = [];
@@ -48,7 +49,8 @@ export async function list(query = {}) {
   return { status: 200, body: { items: data || [], total: count ?? (data || []).length } };
 }
 
-export async function create(body) {
+export async function create(body, principal) {
+  await assertAdmin(principal);
   const warnings = [];
   const p = pickAllowed(body, WRITABLE, warnings);
   const errors = defErrors(p, { isNew: true });
@@ -67,7 +69,8 @@ export async function get(id) {
   return { status: 200, body: { field_definition: await fetchOne(id) } };
 }
 
-export async function update(id, body) {
+export async function update(id, body, principal) {
+  await assertAdmin(principal);
   const row = await fetchOne(id);
   const warnings = [];
   const p = pickAllowed(body, WRITABLE, warnings);
@@ -82,7 +85,8 @@ export async function update(id, body) {
   return { status: 200, body: { field_definition: data, ...(warnings.length ? { warnings } : {}) } };
 }
 
-export async function remove(id) {
+export async function remove(id, principal) {
+  await assertAdmin(principal);
   const row = await fetchOne(id);
   const { data, error } = await supabaseAdmin().from('field_definitions').update({ active: false }).eq('id', row.id).select().single();
   if (error) throw dbError(error);

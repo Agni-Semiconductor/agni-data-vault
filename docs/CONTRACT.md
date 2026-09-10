@@ -419,3 +419,21 @@ On the bench side, four test files are the regression gate for the wire contract
 `test_supabase.py`, `test_campaign_cloud.py`, `test_campaign_watcher.py`, `test_watcher_storage_alerts.py`.
 **They must pass unmodified.** If they need changing, the wire protocol drifted and the premise of this migration is
 gone — stop and escalate rather than editing them.
+
+## v2.11 Error codes (amends section 3)
+
+Added in v2:
+
+- `read_only` (503) — `VAULT_READONLY=1` is set and the request is a write. The flag gates
+  **POST, PUT, PATCH and DELETE**. PUT matters: `PUT /api/files/:id/content` is the upload
+  path in v2.6, so omitting it would let a read-only shakedown deploy accept file writes.
+- `payload_too_large` (413) — a JSON body over 10 MB, rejected by the server before parsing.
+
+Already in use in v1 but never listed in section 3, recorded here so the vocabulary is
+complete: `server_misconfigured` (500), `storage_error` (500), `not_ready` (409),
+`upload_missing` (422).
+
+A rejected Cloudflare Access assertion is always a bare `unauthorized` to the client; the
+reason is logged server-side only. Without that log, "expired", "wrong audience" and "the
+JWKS endpoint is unreachable" are one indistinguishable 401 — and the third is an outage,
+not a rejected user.

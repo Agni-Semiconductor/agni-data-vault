@@ -4,6 +4,7 @@ import { pickAllowed } from '../validate.js';
 import { bustCache } from '../fieldDefs.js';
 
 const VALUE_RE = /^[a-z0-9][a-z0-9_.-]*$/;
+async function assertAdmin(principal) { if (principal?.kind !== 'human') return; const { data, error } = await supabaseAdmin().from('people').select('role').eq('email', principal.actor).maybeSingle(); if (error) throw dbError(error); if (data?.role !== 'admin') throw new ApiError(403, 'unauthorized', 'Admin role required'); }
 
 async function listExists(key) {
   const { data, error } = await supabaseAdmin().from('option_lists').select('key').eq('key', key).maybeSingle();
@@ -33,7 +34,8 @@ export async function listValues(key, query = {}) {
   return { status: 200, body: { items: data || [], total: count ?? (data || []).length } };
 }
 
-export async function createValue(key, body) {
+export async function createValue(key, body, principal) {
+  await assertAdmin(principal);
   await listExists(key);
   const warnings = [];
   const p = pickAllowed(body, ['value', 'label', 'sort_order', 'meta'], warnings);
@@ -56,7 +58,8 @@ export async function createValue(key, body) {
   return { status: 201, body: { option_value: row, ...(warnings.length ? { warnings } : {}) } };
 }
 
-export async function updateValue(id, body) {
+export async function updateValue(id, body, principal) {
+  await assertAdmin(principal);
   const { data: row, error: e0 } = await supabaseAdmin().from('option_values').select('*').eq('id', id).maybeSingle();
   if (e0) throw dbError(e0);
   if (!row) throw new ApiError(404, 'not_found', 'Option value not found');
@@ -70,7 +73,8 @@ export async function updateValue(id, body) {
   return { status: 200, body: { option_value: data, ...(warnings.length ? { warnings } : {}) } };
 }
 
-export async function removeValue(id) {
+export async function removeValue(id, principal) {
+  await assertAdmin(principal);
   const { data, error } = await supabaseAdmin().from('option_values').update({ active: false }).eq('id', id).select().single();
   if (error) throw dbError(error);
   bustCache();

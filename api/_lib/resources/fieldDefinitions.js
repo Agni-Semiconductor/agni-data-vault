@@ -39,6 +39,13 @@ async function fetchOne(id) {
   return data;
 }
 
+// The flat views (samples_flat / measurements_flat) are generated FROM these rows, so any
+// write here leaves them stale until they are rebuilt. Best-effort on purpose: a field
+// definition that saved correctly must not be reported as failed because a read convenience
+// could not be regenerated. The failure is logged and `vault.rebuild_flat_views()` can be
+// called by hand. Rebuilding also NOTIFYs PostgREST, without which the new column stays
+// invisible over REST until a restart.
+async function rebuildFlatViews() { try { const { error } = await db().rpc('rebuild_flat_views'); if (error) console.warn('flat view rebuild failed:', error.message); } catch (err) { console.warn('flat view rebuild failed:', err?.message || err); } }
 export async function list(query = {}) {
   if (query.entity != null && query.entity !== '' && !ENTITIES.includes(query.entity)) throw new ApiError(400, 'invalid_input', 'entity must be one of sample, measurement, file');
   let q = supabaseAdmin().from('field_definitions').select('*', { count: 'exact' });
@@ -61,7 +68,7 @@ export async function create(body, principal) {
     if (error.code === '23505') throw new ApiError(409, 'conflict', 'field already exists for entity');
     throw dbError(error);
   }
-  bustCache();
+  bustCache(); await rebuildFlatViews();
   return { status: 201, body: { field_definition: data, ...(warnings.length ? { warnings } : {}) } };
 }
 
@@ -81,7 +88,7 @@ export async function update(id, body, principal) {
   if (p.options_list_key) await assertListExists(p.options_list_key);
   const { data, error } = await supabaseAdmin().from('field_definitions').update(p).eq('id', row.id).select().single();
   if (error) throw dbError(error);
-  bustCache();
+  bustCache(); await rebuildFlatViews();
   return { status: 200, body: { field_definition: data, ...(warnings.length ? { warnings } : {}) } };
 }
 
@@ -90,6 +97,6 @@ export async function remove(id, principal) {
   const row = await fetchOne(id);
   const { data, error } = await supabaseAdmin().from('field_definitions').update({ active: false }).eq('id', row.id).select().single();
   if (error) throw dbError(error);
-  bustCache();
+  bustCache(); await rebuildFlatViews();
   return { status: 200, body: { deleted: true, id: data.id, soft: true } };
 }

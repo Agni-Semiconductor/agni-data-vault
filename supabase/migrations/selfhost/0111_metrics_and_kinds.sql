@@ -54,7 +54,13 @@ values
   ('dciv',  'DC-IV',     '{AV,BV}',        '{AI,BI}',    '{}',            'V', 'A', null, true,  true,
    '{onoff,vread,ec_plus,noise_floor_a,i_max_a,j_max_a_cm2}',
    'Right-half on/off from the paired OFF (0->+Vmax) and ON (+Vmax->0) branches. Refuses a sweep pinned at compliance.'),
-  ('aciv',  'AC-IV',     '{Vforce}',       '{Imeas}',    '{Charge}',      'V', 'A', 'C',  false, false,
+  -- y2_col is EMPTY, and that is deliberate rather than an omission. A Clarius AC-IV export
+  -- carries a Charge column, but the frontend does not put it on a second axis by default --
+  -- tests/plotProfiles.ts pins that with "does not select Charge as the default AC-IV secondary
+  -- series". Seeding '{Charge}' here made the registry contradict a decision the code already
+  -- had a test for, which tests/kindRegistryParity.test.ts caught. The registry describes what
+  -- IS plotted, not everything that could be; a client is free to select Charge explicitly.
+  ('aciv',  'AC-IV',     '{Vforce}',       '{Imeas}',    '{}',            'V', 'A', 'C',  false, false,
    '{ec_minus,ec_plus,n_cycles}',
    'Coercive voltage as the MEDIAN across the drive cycles, not the first or the mean.'),
   ('pund',  'PUND',      '{Time,t}',       '{V}',        '{I,Psw,Qsw}',   's', 'V', 'A',  false, false,

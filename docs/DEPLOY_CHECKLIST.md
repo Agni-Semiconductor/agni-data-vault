@@ -35,7 +35,7 @@ VAULT_API_URL=http://localhost:3001 VAULT_API_KEY=<key> bash scripts/smoke.sh
 ## 3. Git remote and Vercel
 
 ```bash
-gh repo create spencerware-cell/agni-data-vault --private --source . --push
+gh repo create Agni-Semiconductor/agni-data-vault --private --source . --push
 ```
 (or create the repo in the GitHub UI and `git remote add origin ... && git push -u origin main`).
 

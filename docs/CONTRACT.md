@@ -209,3 +209,206 @@ registry: `id -> sample_id`, `label`, `family`, `owner`, `stack.* -> stack[]` (o
 `stack.substrate -> substrate`, `growth.institution -> fab_location` (best-effort slug match, else meta.fab_location_raw), `growth.date -> fabricated_on`
 (YYYY-MM -> YYYY-MM-01, mark assumed), `notes`; every key under `status:` -> `meta_status` (ASSUMED -> assumed, UNKNOWN -> unknown);
 existing `sample_id` -> print `SKIP <id> exists`, never overwrite.
+
+---
+
+# Contract v2 — self-hosted on edaserver (amended 2026-09-10)
+
+Sections 1–11 above describe **v1**, the hosted-Supabase build, and remain the historical record. Where v2 contradicts
+v1, **v2 wins**. Everything not restated here is unchanged — in particular sections 4, 5, 6 (entity JSON), and the
+`field_definitions` value-location rule are untouched, because none of them were Supabase-specific.
+
+Workers: this file is still frozen against edits *inside a task*. If something in v2 is impossible, say so in your
+SUMMARY and stop.
+
+## v2.1 What changed and why
+
+Both hosted Supabase projects move to one PostgreSQL 17.10 cluster on `edaserver` (RHEL 9, tailnet-only), fronted by
+PostgREST and a filesystem object store. The vault's data layer is already PostgREST-shaped, so the repoint is a URL
+and a key; the parts with no self-hosted equivalent are Supabase **Auth** and Supabase **Storage's signed URLs**.
+
+Two schemas in one database:
+- **`public`** — the bench tables (`captures`, `device_tests`, `campaign_runs`, `duts`, …), ported verbatim from
+  `ferrodiode-pcb-testbench/server/deploy/selfhost_schema.sql`. See v2.8.
+- **`vault`** — everything in section 4 above.
+
+## v2.2 Stack (replaces the stack line in section 1)
+
+Vite 7 + React 19 + TypeScript (strict) + Tailwind v4 SPA, **hosted on Vercel as static files only**; the API is plain
+JavaScript (ESM, Node 20+) under `api/`, **served by a systemd unit on edaserver**, not a Vercel function.
+PostgreSQL 17.10 + PostgREST + the `fed_storage` object store. Two front doors:
+
+- **Public** — `vault.agnisemi.ai` via Cloudflare, Google Workspace SSO enforced by Cloudflare Access. Routes `/` to
+  Vercel and `/api/*` down a Cloudflare Tunnel. Reaches **`/api/*` only**.
+- **Tailnet** — Caddy on edaserver `:443`. Reaches `/api/*`, `/rest/v1/*` and `/storage/v1/object/*` for machine
+  clients (the bench watcher, the CLI, MCP tools).
+
+**PostgREST, the object store and PostgreSQL stay loopback-bound and are never published through the tunnel.**
+
+## v2.3 Auth (replaces the auth line in section 3 and all of section 9's session model)
+
+`requireAuth` returns a **principal**, not a boolean:
+
+| Credential | Principal | Notes |
+|---|---|---|
+| `Authorization: Bearer <VAULT_API_KEY>` | `{ kind: 'machine', actor: body.created_by ?? 'api' }` | timing-safe compare, unchanged from v1. Also the break-glass path when the IdP is down. |
+| A signature-verified `Cf-Access-Jwt-Assertion` | `{ kind: 'human', actor: <email> }` | verified against the Access team's public keys **and** the application `aud`. Never a trusted header. |
+| neither | 401 `unauthorized` | |
+
+- `created_by` remains client-settable for **machine** principals only (`cli/backfill.py` legitimately writes
+  `created_by: 'backfill'`). A client-supplied `created_by` from a human principal is **ignored** and replaced with the
+  verified email.
+- Supabase Auth is gone: no magic link, no OTP, no `auth.users`, no browser session. `GET /api/me` returns the current
+  principal.
+- The `allowlist` table is no longer an authentication gate — Access plus the Workspace domain and `hd` claim is. It is
+  renamed `people` and retained as the **role map** (`member` | `admin`), because `is_admin()` is a real distinction
+  (deletes, role mutations, `audit_log` reads). A `security_invoker` view keeps the old name working.
+- `audit_log.actor` and `created_by`/`updated_by` now carry a real verified identity instead of the literal `'api'`.
+
+## v2.4 Env vars (replaces the env line in section 3)
+
+**Nothing at all starts with `VITE_`** — stronger than v1's "nothing secret". It is a greppable CI invariant that no
+credential ships in the browser bundle.
+
+| var | where | notes |
+|---|---|---|
+| `VAULT_REST_URL` | server | e.g. `http://127.0.0.1:8087` |
+| `VAULT_STORAGE_URL` | server | same origin as above |
+| `VAULT_SERVICE_JWT` | server | HS256, `role: vault_service`, minted by `tools/mint_service_jwt.py --role` |
+| `VAULT_API_KEY` | server | unchanged from v1 |
+| `VAULT_IDENTITY_*` | server | Access team domain + application `aud` for JWT verification |
+| `VAULT_ADMIN_BOOTSTRAP` | server | seeds the first `admin` row in `people` |
+| `VAULT_READONLY` | server | when `1`, rejects POST/PATCH/DELETE — used for the phase-2 shakedown deploy |
+| `VITE_API_BASE_URL` | client | **not secret**; the API origin. The only permitted `VITE_` var, and it holds no credential. |
+
+Removed: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+
+## v2.5 Pinned deps (amends section 3)
+
+- `@supabase/supabase-js` stays, but becomes a **server-only** dependency. It is retained deliberately: it speaks
+  PostgREST natively, so `api/_lib/resources/*` needs no changes.
+- **Added:** `@tanstack/react-virtual` — 16,384 cells × 2 measurements = 32,768 rows per bench run, and the UI
+  guidelines require virtualizing lists of ≥ 1,000 rows.
+- Python CLI: `requests`, `pyyaml`, **and `openpyxl`** — the latter is imported by `cli/backfill.py` and was missing
+  from `cli/requirements.txt`.
+- Otherwise unchanged: do not add others.
+
+## v2.6 File upload and download (replaces those rows in section 7 and `upload_flow` in section 8)
+
+Signed URLs are gone. They exist so an untrusted browser can reach storage without a credential; behind Access and a
+loopback API that premise no longer holds, and the object store has no signing primitive.
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| POST | `/files/upload-url` | `{measurement_id, filename, size_bytes, sha256}` | 201 `{file_id, storage_path, upload_url: "/api/files/<id>/content", method: "PUT"}`; 409 `duplicate_file` if that sha256 exists for the measurement |
+| PUT | `/files/:id/content` | raw bytes, **streamed** | `{file}` with `upload_state: "ready"` |
+| GET | `/files/:id/content` | — | the bytes, with the stored `Content-Type` and a `Content-Disposition` |
+| GET | `/files/:id/download` | — | `{url: "/api/files/<id>/content", expires_at: null}` — kept for CLI compatibility |
+| POST | `/files` | `{measurement_id, filename, content_base64}` | 201 `{file}` (ready). The 4 MB cap is lifted; the limit is now 50 MB/object. |
+
+The three-step flow (`upload-url` → `PUT` → `register`) still works, so `cli/vault.py` keeps its shape. `register`
+becomes optional, since `PUT /content` flips `upload_state` itself. `upload_flow` in the `/api/schema` response becomes
+`["POST /api/files/upload-url", "PUT bytes to upload_url", "GET /api/files/:id/content to verify"]`.
+
+In the browser, `getFileUrl(file)` is now a **pure string function** with no round trip: the session cookie rides along,
+so `<img src="/api/files/x/content">` and `<a href>` work directly.
+
+`files` gains a **`bucket`** column (`'vault' | 'bench'`, default `'vault'`), and `unique (storage_path)` becomes
+`unique (bucket, storage_path)`. A row with `bucket='bench'` references an object the bench owns: it is served
+read-through and is **read-only in the vault** — `DELETE /api/files/:id` returns 403 for it, and the object store
+refuses deletes outside the `vault` bucket independently.
+
+## v2.7 Frontend contracts (replaces section 9)
+
+**`src/lib/supabase.ts` is deleted. The browser has no database client.** Section 9's clause that "browser reads/writes
+go directly to Supabase (RLS, user session), not through `/api`" is **revoked**.
+
+`src/lib/api.ts` keeps **exactly the same exported function names and shapes** as section 9 — every one becomes a
+`fetch` to `/api/...`. The v1 API and browser response shapes were already identical (sections 6 and 7), so pages,
+`useFieldDefs`, `columnsFromDefs`, `FilterBar` and the react-query wrappers above it are unchanged.
+
+Consequences that are the point of the change, not side effects:
+- `validateEntity` in `api/_lib/fieldDefs.js` becomes the **single** validation path. The browser previously bypassed
+  it entirely.
+- `parseFilenameClient`, `cleanName` and `kindFromName` are **deleted**. They had drifted from their server twins:
+  `cleanName` was Unicode-aware (`/[^\p{L}\p{N} ._\-@#()]/gu`) while the server's `clean` was ASCII-only, so the same
+  filename produced a different storage path depending on which client uploaded it. The server's `parseFilename` and
+  `clean` are now the only copies.
+- RLS is no longer the enforcement point. **The API is.** `vault_service` credentials never leave the server's
+  environment file, PostgREST is loopback-only, and `vault` tables keep RLS enabled with no policies so a
+  mis-provisioned role reads nothing rather than everything.
+
+New routes to fill gaps the browser used to cover client-side:
+- `GET /api/samples/:id/files` — replaces `listFilesForSample`, collapsing `1 + ceil(N/100)` browser queries into one
+  server-side join.
+- Numeric `meta` range filtering moves **server-side** into `api/_lib/query.js`. The v1 client-side `metaRange` branch
+  silently ignored DB pagination.
+
+Routes add `/bench` (see v2.8) and `/figures/:id` is reserved for Part 2.
+
+## v2.8 The bench schema (new section)
+
+The bench tables live in **`public`**, and this is load-bearing rather than incidental:
+
+- `fed_instruments/supabase.py` sends only `apikey` and `Authorization` — **never** `Accept-Profile` — so the bench
+  must be PostgREST's default profile. `PGRST_DB_SCHEMAS="public,vault"`, `public` first.
+- `cloud.py` calls `rpc("bench_storage_usage")`, which is created as `public.bench_storage_usage`. PostgREST resolves
+  RPC in the request's profile, so moving the bench would 404 that call and silently kill the watcher's storage
+  alerting.
+- Four restore tools hardcode `--schema=public`.
+
+**This DDL is a copied wire contract. Do not redesign it, do not rename its schema, and do not "tidy" it.** Three
+invariants must be preserved verbatim, each of which fails silently if broken:
+
+1. Every table has **RLS enabled with no policies**; the service role's `BYPASSRLS` is what makes reads work. Without
+   it PostgREST returns `[]` for every table, the watcher logs a clean tick, and the bench looks unmeasured rather than
+   unauthorized.
+2. `device_tests.measurement` is `not null default ''` — **empty string, not null** — because Postgres treats nulls as
+   distinct in a unique constraint, so a nullable column lets the same cell insert twice instead of upserting.
+3. `alter view … set (security_invoker = on)` on `device_coverage`; without it the view runs as owner and punches
+   straight through (1).
+
+`campaign_runs.n_measured` and its sibling counts are written at the **end** of a run. A live campaign reads 0 with
+tens of thousands of child rows, so anything asking "how far has it got" must `count(*)` on `device_tests`.
+
+The vault's access to `public` is **SELECT only**. The vault never writes bench tables.
+
+`vault.measurements` gains `bench_dut_id` + `bench_run_id` with a composite FK to `public.campaign_runs (run_id,
+dut_id)`, plus `unique (bench_run_id, bench_dut_id)` so registration is idempotent. `meta.external` is retained and
+read as a fallback but no longer written.
+
+## v2.9 Bench plotting and the coverage map (extends section 10)
+
+`PlotKind` is unchanged; `board_csv` already targets the bench's real column names.
+
+The coverage map is a **canvas whose backing store is literally `cols × rows`**, one device per pixel
+(`fillRect(col, row, 1, 1)`), scaled up by CSS. Not a DOM grid and not a charting library — 16,384 marks make both
+wrong. Hover is a `getBoundingClientRect` reverse-projection against a `Map` built once, never a per-event scan.
+
+Two correctness invariants, not style choices:
+
+1. **Untested cells are never painted.** Absence of fill is the signal. A neutral grey for "not visited" makes an
+   untested array read as uniformly healthy.
+2. **The palette is served by the API, never chosen in the frontend.** `/api/bench/coverage` returns `legend`,
+   `colors` and `verdict_codes` alongside the data, mirroring what `/api/coverage` already does on the bench side. The
+   values are computed colour-vision-deficiency results (OKLab ΔE ≥ 8 under Machado protan/deutan simulation) pinned by
+   `tests/test_coverage_palette.py`. Picking them by eye ships a chart a deuteranope cannot read.
+
+The codebook has **five** classes, not six: `no_signal` and `indeterminate` both map to code `2` ("suspect").
+
+Rate charts are **bars, not lines**. Adjacent indices are independent physical wires, so a zero between two spikes is a
+fact about a wire, not a dip in a signal. Empty-state panels render unconditionally **with the reason**, because a
+missing panel is indistinguishable from a crash.
+
+## v2.10 Test commands (amends section 3)
+
+Unchanged: `npm run typecheck`, `npm test`, `npm run lint`, `npm run build`, and the API syntax gate
+`node --check api/handler.js api/_lib/*.js api/_lib/resources/*.js` (now also `server/vault-api.mjs`).
+
+`scripts/smoke.sh` still walks schema → sample → measurement → upload → register → `include=files` → download →
+delete → verify 404, updated for v2.6's upload flow. **That update is the test of the new flow.**
+
+On the bench side, four test files are the regression gate for the wire contract:
+`test_supabase.py`, `test_campaign_cloud.py`, `test_campaign_watcher.py`, `test_watcher_storage_alerts.py`.
+**They must pass unmodified.** If they need changing, the wire protocol drifted and the premise of this migration is
+gone — stop and escalate rather than editing them.

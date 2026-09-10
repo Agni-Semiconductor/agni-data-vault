@@ -1,0 +1,9 @@
+tunnel: <cloudflare_tunnel_id>
+credentials-file: <cloudflared_credentials_file>
+
+ingress:
+  # Everything except /api/* is served by Vercel as the other origin, configured on the Cloudflare side rather than in this file.
+  - hostname: vault.agnisemi.ai
+    path: /api/*
+    service: http://127.0.0.1:8099
+  - service: http_status:404

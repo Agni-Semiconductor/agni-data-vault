@@ -1,0 +1,41 @@
+edaserver.<tailnet>.ts.net {
+	tls <tailscale_cert_path> <tailscale_key_path>
+	encode zstd gzip
+	log {
+		output file /var/log/caddy/vault-access.log
+	}
+	route {
+		request_header -Cf-Access-Jwt-Assertion
+		request_header -X-Vault-*
+
+		# /rest/v1 and /storage/v1 are NEVER published through the Cloudflare tunnel: the token they carry bypasses row-level security on every table, so there is no version of exposing them beyond the tailnet that is safe.
+		# Use handle, not handle_path: nginx expects the full /rest/v1/... and /storage/v1/... paths and strips once with trailing-slash proxy_pass; stripping here too makes PostgREST return 404 for tables that exist.
+		handle /rest/v1/* {
+			reverse_proxy 127.0.0.1:8087
+		}
+
+		handle /storage/v1/* {
+			reverse_proxy 127.0.0.1:8087
+		}
+
+		# A REAL check, not a bare 200. The loudest silent failure in this stack is a service
+		# role provisioned without BYPASSRLS: PostgREST then returns [] for every table, the API
+		# reports success, and the vault looks empty rather than unauthorised. So /healthz must
+		# read a row it knows exists -- vault-api implements that; this only routes it.
+		handle /healthz {
+			reverse_proxy 127.0.0.1:8099
+		}
+
+		handle /api/* {
+			request_body {
+				max_size 200MB
+			}
+			reverse_proxy 127.0.0.1:8099
+		}
+		# Anything else on the tailnet door is not a thing. Without this, a request matching no
+		# handle above falls through the route with no handler and Caddy answers an empty 200.
+		handle {
+			respond 404
+		}
+	}
+}

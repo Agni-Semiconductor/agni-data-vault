@@ -121,8 +121,23 @@ with 26 by migration 0104) instead of answering a bare 200. **Verified:** `/heal
 
 ## 3. Storage
 
-`fed_storage` serves both buckets from one root. Roles are **per bucket**:
-`bench` → `bench_service`, `vault` → `vault_service`. An unknown bucket is 404, not a 500.
+`fed_storage` serves both buckets from one root, with roles **per bucket and per verb** — the
+asymmetry is the point:
+
+| | read (GET/HEAD) | write (POST) | delete |
+|---|---|---|---|
+| `bench` bucket | `bench_service`, `vault_service` | `bench_service` | **nobody: 405** |
+| `vault` bucket | `vault_service` | `vault_service` | `vault_service` |
+
+The vault **reads** bench objects because `vault.files.bucket='bench'` is a read-through
+pointer rather than a copy — that is how 1,012 MB of campaign CSVs avoid being duplicated — and
+never writes them, because the bench is their system of record. Exactly the shape the database
+already has: `vault_service` holds SELECT on the bench tables and no INSERT. The bench does not
+read vault objects; least privilege, not symmetry.
+
+Collapsing these back into one role per bucket looks tidier, passes every other test in the
+file, and breaks capture serving with a 401 that reads as a bad token. There are three tests
+guarding it for that reason. An unknown bucket is 404, not a 500.
 
 `DELETE` exists for the **`vault` bucket only**. The bench's no-delete rule stands and is now a
 named invariant with a test rather than an absent endpoint, because "an unused delete on the
@@ -244,12 +259,36 @@ than any other performance work here.
 
 ## 9. Still open
 
-Decisions that are not mine and are not made:
+### Decided 2026-09-10 (Owen)
 
-1. **One Postgres cluster or two.** `agni-connect`'s spec claims this host with its own
-   containerised Postgres on `/srv/agni-devops`. This document assumes one shared cluster.
-   Changing it rewrites that spec's infrastructure chapter.
-2. **The hostname path split** between `agni-connect` and the vault.
+- **One shared Postgres cluster**, a database per product: `fedbench` holds the bench (`public`)
+  and the vault (`vault`); `agni-connect` gets its own database on the same PGDG 17.10 cluster.
+  Two clusters on one box would double the backup, WAL-archiving, restore-drill and monitoring
+  surface for a one-operator platform, and `agni-connect`'s own MEAS records — "raw-data path,
+  checksum, result rows" — *are* `vault.measurements` and `vault.files`, so one cluster makes
+  that link a foreign key where two make it an HTTP call. The 256 GiB encrypted LVM from that
+  spec still makes sense as the cluster's data directory. **This supersedes `agni-connect`'s
+  containerised-Postgres decision and its infrastructure chapter needs updating to match.**
+
+- **Separate hostnames per product**, not a path split: `vault.<tailnet>.ts.net` and
+  `devops.<tailnet>.ts.net`, each with its own `tailscale cert` and its own Cloudflare Access
+  application. No path-prefix bookkeeping, no route addition that has to be negotiated between
+  two products, and either can move hosts later without breaking the other's URLs. Costs a
+  second cert-renewal timer. The shared data plane (`/rest/v1`, `/storage/v1`) hangs off the
+  vault name, and `agni-connect` reads it as a PostgREST profile. The public door is unchanged:
+  `vault.agnisemi.ai` → Cloudflare → tunnel.
+
+- **The pin map belongs to the board, not to a run.** The crossbar and package-pad views need
+  to know which S1 pin drives which WL net. That is board topology, static across every
+  campaign on a given board revision, so it goes in a `public.board_pin_map` table sourced from
+  versioned board config and keyed by `campaign_runs.board_config` — not extracted from a
+  per-run `analysis.json`, where it would be duplicated across every campaign and absent for
+  any run whose analysis was never generated. **Not built yet**; the views wait on it.
+
+### Still open
+
+1. **The 128×128 mega run** — pointer or upload. Decide on a sha256 comparison against
+   `public.captures.content_sha256`, not on the storage budget.
 3. **The 128×128 mega run** — pointer or upload. Decide on a sha256 comparison against
    `public.captures.content_sha256`, not on the storage budget.
 

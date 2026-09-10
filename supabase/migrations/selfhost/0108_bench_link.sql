@@ -29,6 +29,10 @@ alter table vault.files
 -- storage_path was unique on its own. It must now be unique PER BUCKET, or the same relative
 -- path in two buckets collides.
 alter table vault.files drop constraint if exists files_storage_path_key;
+-- Drop the NEW name too before adding it. Guarding only the old name made this file
+-- fail on a second run with 'relation "files_bucket_storage_path_key" already exists',
+-- and a migration that cannot be re-run is a migration you cannot safely resume.
+alter table vault.files drop constraint if exists files_bucket_storage_path_key;
 alter table vault.files
   add constraint files_bucket_storage_path_key unique (bucket, storage_path);
 
@@ -161,6 +165,23 @@ alter view vault.measurement_bench_run set (security_invoker = on);
 -- ---------------------------------------------------------------------------
 grant usage on schema public to vault_service, vault_read;
 grant select on public.campaign_runs, public.device_tests to vault_service, vault_read;
+-- device_coverage is `revoke all ... from bench_read` in selfhost_schema.sql, so it needs an
+-- explicit grant here or the vault gets 'permission denied for view device_coverage'. It is
+-- THE query for the 128x128 map -- one REST call for a whole array, because PostgREST cannot
+-- express the window function that collapses device_tests to the latest attempt per cell.
+-- Its security_invoker = on means it still respects device_tests' RLS.
+grant select on public.device_coverage to vault_service, vault_read;
+-- The analysis tables (ferrodiode-pcb-testbench/server/deploy/migrations/2026-09-10_cell_analysis.sql)
+-- back the histograms and the outcome map. Guarded: this file must still apply against a
+-- cluster where that migration has not run yet.
+do $$ begin
+  if to_regclass('public.cell_analysis') is not null then
+    grant select on public.cell_analysis to vault_service, vault_read;
+  end if;
+  if to_regclass('public.run_analysis') is not null then
+    grant select on public.run_analysis to vault_service, vault_read;
+  end if;
+end $$;
 grant select on vault.measurement_bench_run to vault_service;
 grant select, insert, update, delete on vault.dut_sample_map to vault_service;
 

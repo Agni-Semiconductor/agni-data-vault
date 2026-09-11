@@ -123,8 +123,28 @@ step "2. Dependencies"
 if [ -d "$APP/node_modules" ] && sudo -u "$SVCUSER" "$NODE" -e "require.resolve('@supabase/supabase-js')" 2>/dev/null; then
   ok "dependencies already installed"
 else
-  ( cd "$APP" && sudo -u "$SVCUSER" npm ci --omit=dev --no-audit --no-fund ) 2>&1 | tail -5 | sed 's/^/      /'
-  if [ -d "$APP/node_modules" ]; then ok "npm ci completed"; else bad "npm ci produced no node_modules"; fi
+  # HOME AND THE CACHE, SET EXPLICITLY. vaultsvc is a system account whose home is
+  # /home/vaultsvc, and that directory does not exist -- deliberately, because a service account
+  # that cannot write a home directory is one fewer place for a compromise to leave things.
+  # npm does not care about the reason: it fails to create ~/.npm and reports
+  #     Log files were not written due to an error writing to the directory: /home/vaultsvc/.npm/_logs
+  # which reads as a logging problem rather than a failed install. Point both at the app tree,
+  # which this service user owns.
+  npm_out=$(mktemp)
+  ( cd "$APP" && sudo -u "$SVCUSER" env HOME="$APP" npm_config_cache="$APP/.npm" \
+      npm ci --omit=dev --no-audit --no-fund ) >"$npm_out" 2>&1
+  # THE REAL EXIT STATUS. The first version piped npm into `tail`, so the status belonged to tail
+  # and npm's failure was invisible; the check that followed asked only whether node_modules
+  # EXISTED, and npm had already created it with one entry before dying. A partial install then
+  # read as a successful one, and the first sign of trouble was the service failing to import.
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok "npm ci completed"
+  else
+    bad "npm ci failed (exit $rc)"
+    tail -12 "$npm_out" | sed 's/^/      /'
+  fi
+  rm -f "$npm_out"
 fi
 
 # WHAT THE SERVER ACTUALLY IMPORTS, checked directly. `npm ci` exiting 0 is not the same as the two

@@ -486,6 +486,48 @@ comment claimed UPDATE was absent while it was granted), and `agent_queries` (01
 read-only or append-only table in `vault` needs an explicit REVOKE, and it always fails
 permissive.** If you add one, write the revoke before the grant.
 
+## 5f. The crossbar, and knowing which pin to touch
+
+The last piece of the bench viewer. The coverage map answers *"did this run measure that cell"*;
+the crossbar answers *"where on the die is the fault"* — a bad word line is a stripe, a bad corner
+a block, and a cell is visibly the intersection of the two lines that made it. Both read the
+**same payload** as the rate bars, so they can never disagree about a wire.
+
+Three decisions carried over from `fed_viewer`'s hand-built version, each load-bearing:
+
+- **Decoration is a fraction of the array, never grid units.** A tick label of "2.6 units" is 8 px
+  on a 128×128 viewBox and 50 px on a 12-column one — how a correct-looking figure becomes giant
+  letters over a postage stamp the moment somebody analyses a small run.
+- **An invisible full-pitch hit target per wire.** A 2 px line is not a click target; a transparent
+  one a whole pitch wide carries the tooltip, hover, click and keyboard focus without making the
+  drawn wire fat enough to lie about how much die it covers.
+- **An unmeasured line is grid, not the bottom of the ramp.** Same invariant as "untested cells are
+  never painted". The test pins both halves, including the one a naive `rate || grid` gets wrong:
+  a measured line with zero failures gets the *lowest ramp colour*, because `0` is falsy.
+
+**`vault.board_pin_map` (0116) is what makes a stripe actionable.** WL 42 is only something you can
+probe once you know it is net `WL_ROW42` on pin `J3-17`. Every row carries a required `source` and
+`confirmed_by`, because hand-entered board wiring is exactly the kind of thing that is wrong and
+nobody notices — a wrong pin sends someone to probe the wrong place, and the measurement they take
+is real, just of something else.
+
+It is keyed by `dut_id` rather than a board revision. Boards very likely share designs and one map
+could serve several, but **which** ones is not something this repo knows, and inventing that
+taxonomy would be the same error as deciding `D116` and `D116_116` are one device.
+`vault.copy_pin_map()` does it deliberately and stamps the copy as `copied from <dut>`.
+
+**No write route, deliberately.** A pin map is bulk reference data transcribed once per board from
+a schematic — 256 rows belongs in a reviewed SQL script, not 256 REST calls.
+
+### The integration check earned its place here
+
+Wiring the pin map into `/api/bench/lines` used `db()`, which `bench.js` scopes to `public` for the
+bench tables — but `board_pin_map` is in `vault`. PostgREST answered *"relation
+public.board_pin_map does not exist"*. **Every mocked test passed**, because a mock answers by
+table name without caring which schema was asked for. Only `npm run check:integration` against real
+PostgREST saw it. That is the class of bug the seam exists to catch, and it took one feature to
+find one.
+
 ---
 
 ## 6. Dual-write is transitional

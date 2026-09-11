@@ -808,3 +808,38 @@ that reads the table later.
 `@anthropic-ai/sdk` — **server-only**, like `@supabase/supabase-js`. It must never appear in a
 browser bundle; the CI invariant that nothing starts with `VITE_` covers the key, and the import
 lives under `api/` only.
+
+
+## v2.16 The crossbar and the pin map (amends v2.8)
+
+`GET /api/bench/lines` now joins `vault.board_pin_map` and each line may carry `net` and `pin`
+alongside `line`, `measured`, `bad` and `rate`. The join is **optional**: a board with no map still
+renders, the tooltip simply says nothing about wiring, and an empty map is a board nobody has
+wired up yet rather than an error.
+
+`rate` is `null` — never `0` — for a line with no measured cells. **"We did not look" and "we
+looked and it was fine" are different statements**, and the crossbar renders the first as grid
+rather than as the bottom of the ramp. This is the same invariant as "untested cells are never
+painted" on the coverage map, and it is the one thing a reimplementation must not lose.
+
+### `vault.board_pin_map`
+
+Keyed `(dut_id, family, line)`, carrying `net`, `pin`, and — because hand-entered board wiring is
+exactly the kind of thing that is wrong and nobody notices — a required `source` and
+`confirmed_by`. A wrong pin sends someone to probe the wrong place, and the measurement they take
+is real, just of something else.
+
+It lives in **`vault`, not `public`**. `public` is the bench's copied wire contract and four
+restore tools dump `--schema=public`; a table there would ride along in every bench restore while
+the bench repo knows nothing about it.
+
+**There is deliberately no write route.** A pin map is bulk reference data transcribed once per
+board from a schematic — 256 rows — and that belongs in a reviewed SQL script or a CSV import, not
+in 256 REST calls. `vault.copy_pin_map(from_dut, to_dut, actor)` copies a verified map onto a
+board that shares the design and **stamps the copy's provenance as `copied from <dut>`**;
+presenting a copy as independent confirmation is how one schematic error becomes two boards' worth
+of wrong probing.
+
+Keyed by `dut_id` rather than a board revision, because boards very likely share designs but
+**which** ones is not something this repo knows, and inventing that taxonomy would be the same
+class of error as deciding `D116` and `D116_116` are one device.

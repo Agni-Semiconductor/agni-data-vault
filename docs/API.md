@@ -77,7 +77,8 @@ same thing, deliberately.
 | GET | `/bench/runs` , `/bench/runs/:runId` | `dut_id, limit, offset` | `{items,total}` / `{run}` |
 | GET | `/bench/coverage` | `dut_id, run_id` | cells plus `legend`, `colors`, `verdict_codes` — **the palette is served with the data so the client cannot invent either**. Five classes, not six: `no_signal` and `indeterminate` both map to code 2. |
 | GET | `/bench/cells` | `dut_id, run_id, limit, offset` | `{items,total}` |
-| GET | `/bench/analysis/cells` , `/bench/lines` | | `{items,total}` |
+| GET | `/bench/analysis/cells` | | `{items,total}` |
+| GET | `/bench/lines` | `dut_id, run_id?` | `{rows, cols, ramp}`. Each line is `{line, measured, bad, rate, net?, pin?}` — `net`/`pin` come from `vault.board_pin_map` when the board has one. **`rate` is `null`, never `0`, for a line with no measured cells**: "we did not look" and "we looked and it was fine" are different statements, and the crossbar renders the first as grid. |
 | GET | `/bench/captures/:captureId/content` | — | raw bytes |
 
 ### Upload and review (E1)

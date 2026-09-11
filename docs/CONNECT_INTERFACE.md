@@ -219,6 +219,66 @@ Honest status, so you can plan around it:
 - **Ports and hostnames** for your side (`devops.agnisemi.ai`, your loopback port, your tunnel) are
   not allocated yet.
 
+## 8b. agni-connect's OWN data
+
+agni-connect is an issue tracker, so most of its data has nothing to do with measurements. Two
+separate questions, and only the first one is about this document.
+
+### Can a different structure share this endpoint? Yes, and it costs nothing
+
+PostgREST exposes a **list** of schemas and `Accept-Profile` picks among them per request. So a
+`devops` schema with a completely different shape is reachable at the *same* URL, port, JWT secret,
+nginx shim and Caddy route — one migration, one line of config, one restart.
+
+**Verified, not assumed** (2026-09-11, against PostgreSQL 17.10 and real PostgREST):
+
+```
+GET /rest/v1/health   Accept-Profile: connect   -> {"n_samples":10,"n_measurements":14,...}
+GET /rest/v1/issues   Accept-Profile: devops    -> [{"number":1,"title":"Stand up PostgREST"...}]
+POST /rest/v1/issues  Content-Profile: devops   -> 201, row returned
+```
+
+and the roles cannot cross:
+
+```
+connect_read -> devops.issues      403  permission denied for schema devops
+devops_app   -> connect.samples    403  permission denied for schema connect
+devops_app   -> vault.measurements 403  permission denied for schema vault
+```
+
+**403, not `[]`.** That matters more than it looks: a wrong grant here fails loudly rather than
+returning an empty array that reads as "no data yet".
+
+Operational note: adding a **table** to an already-exposed schema needs only
+`NOTIFY pgrst, 'reload schema'`. Adding a **new schema** to `PGRST_DB_SCHEMAS` needs a PostgREST
+restart, because that config comes from the unit's environment. The restart is seconds and the
+bench's write path is an idempotent upsert retried on the next watcher tick, so it absorbs one.
+
+### Should it share this database? Probably not — recommendation
+
+Easy and advisable are different questions, and for a Linear clone I would put agni-connect's own
+tables in **its own database** on the same cluster, not in a schema of `fedbench`:
+
+- **Blast radius.** A product that iterates fast should not be running its migrations inside the
+  database holding irreplaceable measurement data.
+- **Recovery is different in kind.** An app bug wanting yesterday's issues back must never imply
+  rolling measurement data back with it. Logical dump and restore are per-database; that
+  separation is the one that matters. (Point-in-time recovery is cluster-wide either way, so it
+  does not distinguish them — the logical path is the realistic one.)
+- **PostgREST is the wrong write path for an issue tracker anyway.** It gives you one statement per
+  request and no transaction spanning requests, so a state transition that also reorders a backlog
+  and writes a notification has to become a trigger or an RPC. Your API server is already on
+  `edaserver`; let it talk **libpq** to its own database, with its own migrations and its own ORM,
+  and use this endpoint only for the measurement reads it is actually good at.
+
+What you give up is a real foreign key from an issue to a measurement — `measurement_id` becomes a
+plain uuid whose integrity you check on write against `connect.measurements`. That is an acceptable
+trade: a dangling link in an issue tracker is a broken link, not corrupted science. And it is not a
+one-way door; `postgres_fdw` makes cross-database joins possible later without moving anything.
+
+If you do want your own data served over **this** endpoint as well — a read-only dashboard, say —
+that is the `devops` schema above, and it is free. The two options are not exclusive.
+
 ## 9. If something here is wrong for you
 
 Say so before building around it. Adding a column to a `connect` view is cheap and we will do it;

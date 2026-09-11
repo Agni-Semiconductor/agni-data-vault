@@ -3,9 +3,14 @@
 **Audience:** whoever is writing agni-connect. This is the whole of what you need to read
 measurement data, and the whole of what is promised to you.
 
-**Status:** the schema and role are built and verified (migration `0118`, probe
-`verify_0118.sql`). The host is **not stood up yet** — see [What is not true yet](#what-is-not-true-yet).
-Nothing here requires a change on your side once it is.
+**Status: the schema is LIVE on edaserver** as of 2026-09-11. Database `fedbench` on the PGDG
+17.10 cluster, all 19 migrations applied, `connect_read` created, and the interface verified in
+place — `connect_read` reads the seven views with row counts identical to the owner's and is
+refused on every base table in `vault` and `public`.
+
+**The HTTP listener is not up yet.** PostgREST, `fed_storage`, nginx and Caddy are not installed
+(that needs root and is a separate step), so you cannot reach it over the wire today. Nothing in
+this document changes when it goes up.
 
 ---
 

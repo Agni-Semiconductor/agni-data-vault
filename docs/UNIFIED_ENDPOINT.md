@@ -733,6 +733,35 @@ Phase 0 is a clean install rather than a negotiation with something already runn
 mode `0750` and unreadable to anyone else — which is correct, and is why an unprivileged survey
 reports those paths as empty rather than as denied.
 
+### Phase 1 is DONE on edaserver, 2026-09-11
+
+`fedbench` exists on the PGDG 17.10 cluster, owned by `agnidata`, and the full chain is applied:
+
+```
+19 applied, 0 already present, 0 failed
+schemas present: vault, connect
+  19 migrations recorded, newest: 0118_connect_interface.sql
+```
+
+Schemas `bench_storage, connect, extensions, migrations, public, vault`. 29 `vault` tables, 12
+bench tables in `public`, and the seeds landed — 32 field definitions, 28 units, 14 cohort group
+keys, 11 metric definitions. Roles carry the attributes they are supposed to: `vault_service`,
+`vault_read` and `bench_service` hold `BYPASSRLS`; **`connect_read` deliberately does not**, which
+is the whole point of the `connect` schema running its views as their owner.
+
+Verified in place rather than assumed: a committed one-row fixture, then `verify_0118.sql`, then
+the fixture removed. `interface counts (owner = role): (1,1,0,0,0)` — identical through the views —
+and every base table in `vault` and `public` refused to `connect_read`.
+
+**Two things this run found and fixed, both recorded above**: the applier was defaulting to the
+`psql` on PATH, which on this box is Calibre's; and `0100` had no transaction wrapper, so its first
+two statements committed before it failed on the missing `pg_trgm`, leaving schemas behind from a
+migration the ledger correctly recorded as never applied. `postgresql17-contrib` was missing and is
+now installed.
+
+**What is still not up: anything that speaks HTTP.** PostgREST, `fed_storage`, nginx and Caddy all
+need root to install, so the endpoint is a database today and not yet an endpoint.
+
 ### Unrelated, and live: the bench has been down since 2026-09-10 14:02
 
 `fedbench-health` — the dead-man's switch — has logged **212 consecutive failures**, first at

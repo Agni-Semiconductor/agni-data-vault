@@ -1,5 +1,36 @@
 # Backfill and labeling campaign — plan
 
+> **Status (2026-09-10): the storage constraint that shaped this plan is gone, and so is one of
+> its two compromises.**
+>
+> This plan was written against a 1 GB hosted Supabase tier holding a 4,289 MB archive, which is
+> why it defers a Pro upgrade, excludes the 128×128 mega run, and calls the 16,821 campaign CSVs
+> "pointer-only". On `edaserver` there is a 1 TB allocation, so **no storage upgrade is needed
+> for any phase** and no phase is excluded for size.
+>
+> **Pointer-only turned out to be the right design rather than a budget compromise, and it is now
+> implemented.** `vault.files.bucket` (migration `0108`) lets a vault `files` row point at
+> `bucket='bench', storage_path='captures/…'`, and `GET /api/files/:id/content` serves it from the
+> bench's own objects. Those bytes are already on the same disk — the nightly archive writes
+> `<archive>/objects/bench/<storage_path>`, byte-for-byte the tree `fed_storage` serves — so
+> copying them into a `vault/` bucket would make a *third* copy of bytes that are already there.
+> Zero duplicate bytes for 16,821 files. `bucket='bench'` rows are read-only in the vault, enforced
+> twice: `files.js::remove` returns 403, and `fed_storage`'s `DELETABLE_BUCKETS` refuses
+> independently.
+>
+> **The mega run needs a determination, not a decision.** Compare `select content_sha256 from
+> public.captures` against the archive's hashes for `Agni/data/August 1st 128 mega run`. If they
+> match, they are the same bytes and pointers are correct — 2,328 MB saved and "pointer-only" was
+> right all along, merely badly named. If they do not, it is a separate export and should be
+> uploaded; 2.3 GB against 1 TB is nothing. **Either way the answer comes from the hashes, not from
+> a storage budget**, which is the sentence this header exists to replace.
+>
+> Everything below about evidence classes, the sure-only rule, the review queue and the hard rules
+> for agents is **unchanged and still governs** — that is the part of this plan that was never
+> about storage. The `meta.external` shape it describes now has a real implementation in
+> `bench_dut_id`/`bench_run_id` and the `vault.measurement_bench_run` view; keep reading
+> `meta.external` as a fallback, stop writing it.
+
 Goal: get Agni's existing measurement archive into the Data Vault with labels an agent is **certain** of, and a review queue for everything else. Run as a model-manager delegation (`2026-09-10-backfill`), Fable managing, GLM 5.3 Flash doing most of the work, GPT Terra held for the harder reading and reviews because the OpenAI quota is close to its limit.
 
 ## 1. The rule: label only what the evidence proves

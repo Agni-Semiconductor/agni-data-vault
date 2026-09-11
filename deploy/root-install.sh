@@ -274,7 +274,36 @@ if [ "${INSTALL_EXTRA:-0}" = 1 ]; then
   # `psycopg[binary]>=3.1` is a valid glob -- `[binary]` is a character class. It survives today
   # only because nothing in the cwd matches, which is not a property to depend on.
   IFS=' ' read -ra REQ_ARR <<<"$REQS"
-  sudo -u fedbackup "$VENV" -m pip install --quiet --upgrade "${REQ_ARR[@]}"     && ok "installed ${#REQ_ARR[@]} requirements into the venv as fedbackup"     || bad "pip install failed -- see above"
+
+  # THE VENV HAS NO pip, because uv does not put one there. `uv venv` creates a standard virtual
+  # environment deliberately WITHOUT pip, so `python -m pip` fails with "No module named pip" --
+  # which reads as a broken venv rather than a venv built by a different tool.
+  #
+  # ensurepip is stdlib and adds pip to this venv without touching anything installed in it. That
+  # is NOT the `uv sync` the fed-storage header forbids: sync resolves the whole project and
+  # PRUNES what is not in the lock, which is what would remove the editable keithley-control
+  # install. Adding pip removes nothing.
+  if ! sudo -u fedbackup "$VENV" -c 'import pip' 2>/dev/null; then
+    warn "venv has no pip (uv builds them that way) — bootstrapping with ensurepip"
+    sudo -u fedbackup "$VENV" -m ensurepip --upgrade >/dev/null 2>&1 \
+      && ok "pip bootstrapped into the venv" \
+      || warn "ensurepip failed — falling back to uv"
+  fi
+
+  if sudo -u fedbackup "$VENV" -c 'import pip' 2>/dev/null; then
+    sudo -u fedbackup "$VENV" -m pip install --quiet --upgrade "${REQ_ARR[@]}" \
+      && ok "installed ${#REQ_ARR[@]} requirements into the venv as fedbackup" \
+      || bad "pip install failed -- see above"
+  elif UV=$(command -v uv || echo /usr/local/bin/uv) && [ -x "$UV" ]; then
+    # `uv pip install` installs into the named environment and resolves nothing beyond what is
+    # asked for. It is the per-package command, not the whole-project one.
+    sudo -u fedbackup "$UV" pip install --python "$VENV" "${REQ_ARR[@]}" \
+      && ok "installed ${#REQ_ARR[@]} requirements via uv" \
+      || bad "uv pip install failed -- see above"
+  else
+    bad "no pip in the venv and no uv on PATH -- cannot install ${REQ_ARR[*]}"
+  fi
+
   for m in starlette uvicorn psycopg; do
     "$VENV" -c "import $m" 2>/dev/null && ok "  import $m" || bad "  $m still missing"
   done
@@ -319,7 +348,12 @@ else
   # unconditionally, so a failed alter left secrets.env holding a password nothing had been set
   # to -- and the next run, seeing PGRST_DB_URI present, reported ok and never touched it again.
   # A credential wrong forever, reported as fine, from one missing `if`.
-  if sudo -u postgres "$PSQL" -q -v ON_ERROR_STOP=1 -d fedbench \n       -c "alter role authenticator with login password '$PW'"; then
+  # ONE LINE, deliberately. This was written with an escaped line continuation that came out as
+  # the two characters `\` and `n`. Bash reads that as an escaped `n`, so psql received a bare `n`
+  # as a positional argument, took it for the username, and failed with
+  #     FATAL: Peer authentication failed for user "n"
+  # -- a connection error naming a user that appears nowhere in the command.
+  if sudo -u postgres "$PSQL" -q -v ON_ERROR_STOP=1 -d fedbench -c "alter role authenticator with login password '$PW'"; then
     ok "authenticator given a password"
     umask 077
     printf 'PGRST_DB_URI=postgres://authenticator:%s@127.0.0.1:5432/fedbench
@@ -380,7 +414,21 @@ for s in fed-postgrest fed-storage nginx; do
     systemctl reload nginx && ok "nginx was already running -- reloaded to pick up conf.d"
   fi
   systemctl enable --now "$s" >/dev/null 2>&1
-  systemctl is-active --quiet "$s" && ok "$s active" || { bad "$s failed"; journalctl -u "$s" -n 8 --no-pager | sed 's/^/      /'; }
+  if systemctl is-active --quiet "$s"; then
+    ok "$s active"
+  else
+    bad "$s failed"
+    journalctl -u "$s" -n 8 --no-pager | sed 's/^/      /'
+    # SELinux first, every time. On this box a denial is the likeliest cause and the journal line
+    # never says so -- it reports the symptom (Permission denied, a 502, a unit that will not
+    # load) and leaves the cause to `ausearch`. Running it here means nobody has to remember to.
+    denials=$(ausearch -m avc -ts recent 2>/dev/null | grep -c 'denied' || true)
+    if [ "${denials:-0}" -gt 0 ]; then
+      printf '      [33m%s SELinux denial(s) in the last few minutes:[0m
+' "$denials"
+      ausearch -m avc -ts recent 2>/dev/null | grep 'denied' | tail -4 | sed 's/^/        /'
+    fi
+  fi
 done
 
 # ══════════════════════════════════════════════════════════════════════════════════════════

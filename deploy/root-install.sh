@@ -24,7 +24,7 @@
 #   (all three copied from $UNITSRC, default /home/agnidata/work/deploy -- NOT from the
 #    fedbackup checkout, which the nightly archive timers run out of and this never touches)
 #   SELinux: one boolean, one port label, one fcontext rule on server/config
-#   the fedbackup venv (pip install of the already-declared `storage` extra, as fedbackup)
+#   /srv/fedbench/venv                       (the service's own venv, created as fedbackup)
 #   secrets.env (appends the JWT secret and PGRST_DB_URI if absent; never rewrites an existing one)
 #
 # It does not read, list or modify anything under /home, /storage/home or /home/shared. This box
@@ -340,60 +340,6 @@ else
   ok "service venv already has what fed_storage needs"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════════════════════
-if [ "${INSTALL_EXTRA:-0}" = 1 ]; then
-  # THE THREE REQUIREMENTS, NOT THE PROJECT.
-  #
-  # `pip install "$REPO/server[storage]"` was the obvious command and the wrong one. fed_storage is
-  # not imported from an installed distribution -- the unit sets PYTHONPATH=server/src, which is
-  # how the fed-* services on this box resolve it. Installing the project would pull fed-bridge and
-  # its five runtime deps (mcp, aiomqtt, pydantic, pyyaml, structlog) into a venv other tooling
-  # runs from, for nothing, and would convert an editable install into a regular one behind
-  # whoever depends on it.
-  #
-  # $REQS was read from pyproject's `storage` extra up in the assertions, so there is exactly one
-  # declaration of these versions and this cannot drift from it.
-  #
-  # An ARRAY, not an unquoted $REQS: pathname expansion applies to the result of an expansion, and
-  # `psycopg[binary]>=3.1` is a valid glob -- `[binary]` is a character class. It survives today
-  # only because nothing in the cwd matches, which is not a property to depend on.
-  IFS=' ' read -ra REQ_ARR <<<"$REQS"
-
-  # THE VENV HAS NO pip, because uv does not put one there. `uv venv` creates a standard virtual
-  # environment deliberately WITHOUT pip, so `python -m pip` fails with "No module named pip" --
-  # which reads as a broken venv rather than a venv built by a different tool.
-  #
-  # ensurepip is stdlib and adds pip to this venv without touching anything installed in it. That
-  # is NOT the `uv sync` the fed-storage header forbids: sync resolves the whole project and
-  # PRUNES what is not in the lock, which is what would remove the editable keithley-control
-  # install. Adding pip removes nothing.
-  if ! sudo -u fedbackup "$VENV" -c 'import pip' 2>/dev/null; then
-    warn "venv has no pip (uv builds them that way) — bootstrapping with ensurepip"
-    sudo -u fedbackup "$VENV" -m ensurepip --upgrade >/dev/null 2>&1 \
-      && ok "pip bootstrapped into the venv" \
-      || warn "ensurepip failed — falling back to uv"
-  fi
-
-  if sudo -u fedbackup "$VENV" -c 'import pip' 2>/dev/null; then
-    sudo -u fedbackup "$VENV" -m pip install --quiet --upgrade "${REQ_ARR[@]}" \
-      && ok "installed ${#REQ_ARR[@]} requirements into the venv as fedbackup" \
-      || bad "pip install failed -- see above"
-  elif UV=$(command -v uv || echo /usr/local/bin/uv) && [ -x "$UV" ]; then
-    # `uv pip install` installs into the named environment and resolves nothing beyond what is
-    # asked for. It is the per-package command, not the whole-project one.
-    sudo -u fedbackup "$UV" pip install --python "$VENV" "${REQ_ARR[@]}" \
-      && ok "installed ${#REQ_ARR[@]} requirements via uv" \
-      || bad "uv pip install failed -- see above"
-  else
-    bad "no pip in the venv and no uv on PATH -- cannot install ${REQ_ARR[*]}"
-  fi
-
-  for m in starlette uvicorn psycopg; do
-    "$VENV" -c "import $m" 2>/dev/null && ok "  import $m" || bad "  $m still missing"
-  done
-else
-  ok "venv already has what fed_storage needs"
-fi
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 step "3. The shared JWT secret, and the authenticator role"
@@ -673,6 +619,7 @@ cat <<'UNDO'
   systemctl disable --now fed-postgrest fed-storage nginx
   rm -f /etc/systemd/system/fed-{postgrest,storage}.service /etc/nginx/conf.d/nginx-fedbench.conf
   rm -f /usr/local/bin/postgrest
+  rm -rf /srv/fedbench/venv                    # the service venv; /srv/fedbench/objects is NOT removed
   systemctl daemon-reload
   # The two SELinux changes are PERSISTENT (-P, and the port label is in the policy store), so
   # they survive a reboot and outlive everything above. Leaving them costs nothing and reverting

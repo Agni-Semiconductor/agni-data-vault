@@ -671,3 +671,29 @@ Cloudflare), Google Workspace as an Access IdP, the Tailscale ACL entry, the x86
 binary, re-pulling the archive and **proving it restorable** (`state/last_restore_verify.json`
 is missing and the last pull is dated 2026-08-14), and a **second physical copy** before either
 cutover — after which the hosted projects stop being one.
+
+### The bulk data is already on edaserver (2026-09-11)
+
+Confirmed by Owen: the large data already lives on the box, though **not necessarily on the
+volume the endpoint would use**. Three consequences, and the middle one is the one that gets
+misread:
+
+1. **Phase −1 is cheaper than it looks.** The seed for both halves does not have to cross the
+   DERP-relayed link — the nightly archive already writes
+   `<archive>/objects/bench/<storage_path>`, byte-for-byte the tree `fed_storage` serves. So the
+   work is a restore and a verification, not a transfer.
+
+2. **Bytes on the box are not a restorable database, and they are not a second copy.** This is
+   the distinction `ARCHIVE_RUNBOOK.md` keeps making and it survives this news intact:
+   `verify_archive.py` currently certifies that the archived *bytes* are intact, and has returned
+   `SKIP` for `sanity_floor` and `table_parity` every month because `fedbench_analysis` does not
+   exist. Data being present on edaserver moves nothing on that question. Nor does it satisfy the
+   second-physical-copy gate — one allocation on one shared spindle is one disk.
+
+3. **Find out which volume it is on before sizing anything.** "Not necessarily where the endpoint
+   would be" is the load-bearing half of the sentence. The 1 TB figure, the cluster's data
+   directory, the object tree and the 256 GiB encrypted LVM from the `agni-connect` spec are four
+   separate claims about storage on one host, and a plan that assumes they are the same mount
+   discovers otherwise partway through a restore. `df -h`, `lsblk` and the mount options
+   (`ARCHIVE_RUNBOOK.md` §E1 records `/srv/nextcloud/fedbench` as `noquota` on a shared 8 TB
+   spindle) settle it in a minute and are worth doing before phase 0.

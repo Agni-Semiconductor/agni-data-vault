@@ -14,7 +14,12 @@ Type=oneshot
 # fedbackup is the existing non-root account that runs the fedbench data services; it can read the
 # database and owns its backup output, unlike root-owned output which later reads as a dump failure.
 User=fedbackup
-ExecStart=/srv/fedbackup/ferrodiode-pcb-testbench/deploy/backup-fedbench.sh
+# /usr/local/bin, NOT the repo checkout. That path is inside fedbackup's HOME (/srv/fedbackup),
+# so SELinux labels it user_home_t, and systemd may not exec a binary with that label -- it fails
+# with "Failed to locate executable: Permission denied", which reads as a missing file. It is the
+# same failure that broke fed-storage. /usr/local/bin is already bin_t, so exec is permitted and
+# the service transitions out of init_t. backup-install.sh installs the script there.
+ExecStart=/usr/local/bin/backup-fedbench.sh
 # Keep the installed system and configuration read-only; a writable system tree can turn a failed
 # backup into an apparent later application fault instead of containing the write to its output.
 ProtectSystem=full

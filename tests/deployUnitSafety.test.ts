@@ -116,6 +116,29 @@ describe('deploy systemd units are safe before an operator installs them', () =>
     expect(offenders, 'a oneshot with neither [Install] nor an enableable .timer is never run by anything').toEqual([])
   })
 
+  it('never execs out of a service account home, including the one not under /home', () => {
+    // The /home/ check above is necessary and NOT sufficient, which is how a real unit got through:
+    // fedbackup's home directory is /srv/fedbackup, so everything in the checkout there is labelled
+    // user_home_t by SELinux while matching no path containing "/home/". systemd may not exec a
+    // user_home_t binary; it fails with
+    //     Failed to locate executable ...: Permission denied
+    // which reads as a MISSING FILE. fedbench-backup.service shipped pointing at
+    // /srv/fedbackup/ferrodiode-pcb-testbench/deploy/backup-fedbench.sh -- a path that was both
+    // inside that home and nonexistent -- and this suite passed it.
+    //
+    // /srv/fedbench (the vault's own tree) is NOT a home and is deliberately not listed: the
+    // fed-storage interpreter lives at /srv/fedbench/venv/bin/python and is relabelled bin_t by
+    // root-install.sh.
+    const serviceHomes = ['/srv/fedbackup/', '/home/']
+    const offenders = files.flatMap((path) =>
+      contents(path)
+        .filter((line) => /^\s*ExecStart=/.test(line))
+        .filter((line) => serviceHomes.some((home) => line.includes(home)))
+        .map((line) => `${show(path)}: ${line.trim()}`),
+    )
+    expect(offenders, 'systemd cannot exec a user_home_t binary; the error names the file, not the label').toEqual([])
+  })
+
   it('uses absolute executable paths in ExecStart directives', () => {
     const offenders = files.flatMap((path) => contents(path)
       .filter((line) => /^\s*ExecStart=/.test(line))

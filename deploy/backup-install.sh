@@ -134,9 +134,28 @@ systemctl is-enabled --quiet fedbench-backup.timer && ok "fedbench-backup.timer 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 step "3. Verify the timer can actually make a backup"
 # ══════════════════════════════════════════════════════════════════════════════════════════
+# INSTALL THE SCRIPT WHERE THE UNIT CAN EXEC IT, and exercise THAT copy.
+#
+# The staging directory lives under /home/agnidata, which is 0700, so the service user cannot even
+# traverse it -- runuser fails with "Permission denied" naming the script, which reads as a mode
+# problem on the file rather than on a directory three levels up. And the unit must not point into
+# the checkout either: that is inside fedbackup's HOME, so SELinux labels it user_home_t and
+# systemd may not exec it at all. /usr/local/bin is already bin_t and world-traversable.
+#
+# Verifying the STAGED copy rather than the INSTALLED one would also be a lie: it proves a file the
+# timer will never run is executable.
+install -m 0755 -o root -g root "$BACKUP_SCRIPT" /usr/local/bin/backup-fedbench.sh   && ok "installed /usr/local/bin/backup-fedbench.sh (bin_t, executable by the service user)"
+restorecon /usr/local/bin/backup-fedbench.sh 2>/dev/null || true
+
+unit_exec=$(grep -vE '^[[:space:]]*(#|;|$)' /etc/systemd/system/fedbench-backup.service | grep -m1 '^ExecStart=' | cut -d= -f2- | awk '{print $1}')
+case "$unit_exec" in
+  /usr/local/bin/*|/usr/bin/*|/bin/*) ok "unit execs $unit_exec (a bin_t path)" ;;
+  *) bad "unit execs $unit_exec -- not a path systemd can be relied on to exec; see the comment above" ;;
+esac
+
 # An enabled timer whose script fails is the exact shape of a backup everyone believes in and
-# nobody has. Exercise the staged script as the unit's user now; --dry-run writes nothing.
-if runuser -u "$SERVICE_USER" -- "$BACKUP_SCRIPT" --dry-run; then
+# nobody has. Exercise the INSTALLED script as the unit's user; --dry-run writes nothing.
+if runuser -u "$SERVICE_USER" -- /usr/local/bin/backup-fedbench.sh --dry-run; then
   ok "backup script --dry-run succeeded as $SERVICE_USER"
 else
   bad "backup script --dry-run failed as $SERVICE_USER -- an enabled timer would produce no backup"
@@ -155,6 +174,7 @@ printf '\n\033[1mTo undo:\033[0m\n'
 cat <<UNDO
   systemctl disable --now fedbench-backup.timer
   rm -f /etc/systemd/system/fedbench-backup.{service,timer}
+  rm -f /usr/local/bin/backup-fedbench.sh
   systemctl daemon-reload
   # $BACKUPDIR is left deliberately: deleting it discards local recovery points.
 UNDO

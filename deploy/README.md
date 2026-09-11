@@ -84,10 +84,10 @@ it is not in a pg_dump and must never be regenerated. PostgREST and fed_storage 
 tokens. Regenerating it leaves metadata reads working while every object download returns 401,
 which reads as a corrupt archive rather than a mismatched key.
 
-The installed services are currently loopback-only: PostgREST 16.3 at `127.0.0.1:3000`,
+The installed data-plane services are loopback-only: PostgREST 16.3 at `127.0.0.1:3000`,
 fed_storage at `127.0.0.1:3001`, and the nginx shim at `127.0.0.1:8087`. All three are enabled and
-active; nothing is published on the tailnet yet, and Caddy, the Tailscale certificate, and the
-Cloudflare tunnel are not part of this script. nginx strips `/rest/v1/` before proxying to
+active. Caddy, the Tailscale certificate, and the Cloudflare tunnel are not part of the root
+install script. nginx strips `/rest/v1/` before proxying to
 PostgREST, does not strip `/storage/v1/` for fed_storage, and returns 404 for everything else.
 PostgREST uses `PGRST_DB_SCHEMAS=public,vault,connect` and `PGRST_DB_ANON_ROLE=bench_read`.
 Unauthenticated requests return HTTP 401 with Postgres error 42501, never an empty array; an
@@ -105,6 +105,96 @@ rules only after checking that no other service needs them; in particular,
 `httpd_can_network_connect` is box-wide. The object root and `secrets.env` are deliberately left
 in place because removing them loses data and the authenticator password, neither of which a
 rerun recreates.
+
+## Vault API install
+
+`deploy/vault-api-install.sh` installs the application endpoint behind `/api` and `/healthz`.
+Run its assertion pass first, because it changes nothing and catches missing staged files,
+dependencies, the nginx shim, the service account, the shared JWT secret, and port collisions:
+
+```
+sudo bash deploy/vault-api-install.sh --check
+```
+
+Only after that passes should the install be run:
+
+```
+sudo bash deploy/vault-api-install.sh
+```
+
+Node 22 is required. RHEL 9 defaults to the `nodejs:16` module stream, which is too old for this
+repository's ESM and can fail at parse time with a syntax error that looks like corrupt source.
+Upgrade the stream before running the installer:
+
+```
+sudo dnf module switch-to -y nodejs:22
+```
+
+The application tree must be staged at `/srv/vault/app`; the installer recursively makes it owned
+by `vaultsvc` before running `npm ci`. The service must update its own `node_modules`, so installing
+dependencies as root leaves root-owned files the service cannot touch and the failure appears later
+as a service import or update problem.
+
+`vaultsvc` is deliberately a system account with no home directory. The installer therefore sets
+`HOME=/srv/vault/app` and `npm_config_cache=/srv/vault/app/.npm` explicitly for npm. Without those
+values npm tries to create `~/.npm` and reports a `LOGGING` error about being unable to write
+`/home/vaultsvc/.npm/_logs`, which looks like a failed install even though the misleading message is
+about log placement.
+
+An existing `/etc/vault/vault-api.env` is never rewritten. It contains a minted service token and a
+generated `VAULT_API_KEY` that a rerun cannot recreate; replacing either would look like a successful
+install while revoking the credential in use. The one exception is a `VAULT_REST_URL` ending in
+`/rest/v1` (with or without a trailing slash): the installer keeps a timestamped backup and corrects
+that value in place. `supabase-js` receives this URL and appends `/rest/v1` itself, so the suffix
+duplicates the path as `/rest/v1/rest/v1/<table>`. nginx strips one prefix and PostgREST returns
+`PGRST125`, `Invalid path specified in request URL`, a symptom that names neither the bad variable
+nor the duplicated path. `VAULT_STORAGE_URL` is different: `api/_lib/storage.js` consumes it
+directly, so it must include `/storage/v1`. `tests/vaultUrlShape.test.ts` pins this asymmetry.
+
+The service unit is installed from the staging directory, enabled, restarted, and checked locally.
+Its process runs as the `vaultsvc` system account on `127.0.0.1:8099`; the loopback bind is asserted
+against the kernel because the process holds a `vault_service` token with `BYPASSRLS` and write access
+to every vault table. Exposing that listener would expose that credential, so it sits behind the two
+proxies. The env file is `/etc/vault/vault-api.env`, mode `0640`, owned by `root:vaultsvc`.
+
+The full stack is live on `edaserver` as of 2026-09-11. This was verified from a separate tailnet
+device, not from the server itself. Caddy routes `/api/*` and `/healthz` to port 8099, and routes
+`/rest/v1/*` and `/storage/v1/*` to the nginx shim on port 8087. Port 443 is bound only to the
+tailnet addresses. `/api/*` returns 401 even for nonexistent routes because authentication runs
+before routing; that deliberate behavior avoids leaking route existence, but means a 401 or 404
+probe cannot establish whether an API route is deployed.
+
+The external health probe is:
+
+```
+https://edaserver.tailcb2a72.ts.net/healthz -> 200
+{"ok":true,"checks":{"database":{"ok":true,"field_definitions":32},"duration_ms":4}}
+```
+
+The `field_definitions: 32` value matters: `/healthz` reads a row it knows exists rather than
+returning bare `{"ok":true}`. Every vault table has RLS enabled with no policies, so a role without
+`BYPASSRLS` gets empty results while status codes remain 200. An empty database and an unauthorised
+role are therefore indistinguishable from outside; a zero `field_definitions` count is the positive
+failure signal.
+
+`connect.health` still returns all zeros. The schema is built, but no vault data has been migrated
+from hosted Supabase, so that result is expected rather than a failed deployment. Use seeded
+`connect.kinds` (7 rows) as the liveness probe. The Cloudflare tunnel and Access public door are
+deliberately not built; access remains tailnet-only. Backups are local only: `deploy/backup-fedbench.sh`
+says on every run that a dump on the database's own host is not a second physical copy and does not
+clear the cutover gate.
+
+To undo the Vault API install, run the block printed by the script:
+
+```
+systemctl disable --now vault-api
+rm -f /etc/systemd/system/vault-api.service
+systemctl daemon-reload
+```
+
+The script deliberately leaves `/etc/vault/vault-api.env` and `/srv/vault/app` in place. The env
+file holds the minted service token and generated `VAULT_API_KEY`, neither of which a rerun recreates;
+the application tree is likewise not removed by the undo block.
 
 ## The tailnet certificate renews on a timer
 
@@ -149,8 +239,10 @@ authenticates rather than relying on the name being unguessable.
 
 ## Contract v2.4 Env Vars
 
-- `VAULT_REST_URL`: server, e.g. `http://127.0.0.1:8087`.
-- `VAULT_STORAGE_URL`: server, same origin as above.
+- `VAULT_REST_URL`: server base URL, e.g. `http://127.0.0.1:8087`; do not add `/rest/v1`, because
+  `supabase-js` appends that prefix.
+- `VAULT_STORAGE_URL`: server URL including `/storage/v1`, e.g.
+  `http://127.0.0.1:8087/storage/v1`; `storage.js` appends object paths directly.
 - `VAULT_SERVICE_JWT`: server, HS256, `role: vault_service`, minted by `tools/mint_service_jwt.py --role`.
 - `VAULT_API_KEY`: server, unchanged from v1.
 - `VAULT_ACCESS_TEAM_URL`: server, `https://<team>.cloudflareaccess.com`.

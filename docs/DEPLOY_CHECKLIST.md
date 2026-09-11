@@ -432,8 +432,22 @@ the data plane on the host's `192.168.51.1`, `10.10.10.2` and `10.177.7.111` int
 server does hold `0.0.0.0:80`, which is unrelated to this loopback-only vault shim.
 
 Routes are exact: `/rest/v1/*` and `/storage/v1/*` go to `127.0.0.1:8087`; `/healthz` and `/api/*`
-go to `127.0.0.1:8099`. `vault-api` is not installed, so those last two routes currently return
-502 as expected; the data plane does not depend on it. Anything else returns 404.
+go to `127.0.0.1:8099`, where `vault-api` now runs. Anything else returns 404.
+
+`/healthz` answers 200 with a row count, not a bare liveness flag:
+
+```json
+{"ok":true,"checks":{"database":{"ok":true,"field_definitions":32},"duration_ms":4}}
+```
+
+That count is the check. Every vault table has RLS enabled with no policies, so a role provisioned
+without `BYPASSRLS` returns `[]` from every table while each status code stays 200 — an empty
+database and an unauthorised one are indistinguishable from outside. `field_definitions` is seeded
+and never legitimately empty, so **zero there is a positive signal of that failure**, not a shrug.
+
+`/api/*` returns 401 even for routes that do not exist, because authentication runs before routing.
+That is deliberate — it does not leak which routes exist — but it means a 401-versus-404 probe
+cannot tell you whether a given route is deployed.
 
 ### Verify the live door from a separate tailnet device
 
@@ -457,9 +471,10 @@ liveness probe. A probe that cannot fail is not a probe.
 
 The tailnet is an outer factor, not the gate: every path behind this door independently validates the
 HS256 service JWT, and tailnet membership grants nothing on its own. The public door (Cloudflare
-tunnel plus Access) was deliberately **not** built on 2026-09-11, and the vault API was deliberately
-not installed; those are unchanged, so the expected 502s and tailnet-only scope are not deployment
-failures.
+tunnel plus Access) was deliberately **not** built on 2026-09-11, so the tailnet-only scope is a
+decision rather than a deployment failure. `vault-api` WAS installed later the same day, so `/api`
+and `/healthz` no longer return 502; if you see one now, it is a real failure and the runbook's
+symptom table covers it.
 
 Two things in the Caddyfile not to tidy:
 

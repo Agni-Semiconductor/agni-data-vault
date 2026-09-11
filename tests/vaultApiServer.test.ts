@@ -108,11 +108,17 @@ describe('vault API server deployment boundary', () => {
     // The other half, because a guard that rejects everything also passes the test above. Points at
     // a closed port: the check is that it reaches "listening", not that it can serve anything.
     const env = { ...process.env, VAULT_REST_URL: 'http://127.0.0.1:1/rest/v1', VAULT_SERVICE_JWT: 'test-token', PORT: '18198' }
-    // The server never exits on its own, so spawnSync's timeout is what ends it. Its output is
-    // still captured, which is all this needs: reaching "listening" proves the guard let a
-    // correctly configured start through.
+    // ASSERT ON PROCESS STATE, NOT ON STDOUT. The first version matched the "listening" line, and
+    // it was flaky: the server never exits on its own, so spawnSync's timeout kills it with
+    // SIGTERM, and node does not reliably flush a piped stdout on the way out. It passed by luck
+    // and then failed for a reason unrelated to the code under test -- a flaky test is worse than
+    // no test, because it teaches people to re-run rather than read.
+    //
+    // The deterministic signals: a guard REJECTION exits immediately with status 1 and prints the
+    // refusal. A successful start never exits, so the timeout kills it and status is null.
     const run = spawnSync(process.execPath, [serverPath], { env, encoding: 'utf8', timeout: 3_000 })
-    expect(`${run.stdout ?? ''}${run.stderr ?? ''}`, 'the guard must not reject a correctly configured start')
-      .toMatch(/listening/i)
+    const output = `${run.stdout ?? ''}${run.stderr ?? ''}`
+    expect(output, 'the guard must not reject a correctly configured start').not.toMatch(/refusing to start/i)
+    expect(run.status, 'exiting at all means it refused; a correct start runs until the timeout kills it').not.toBe(1)
   }, 15_000)
 })

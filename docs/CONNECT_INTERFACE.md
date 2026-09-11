@@ -190,6 +190,15 @@ nothing.** RLS is enabled with no policies, so a grant mistake means every query
 your application shows an empty database rather than an access failure. A health check that returns
 `200 {"ok": true}` reports perfect health in exactly that state.
 
+agni-connect can use `https://edaserver.tailcb2a72.ts.net/healthz` as a dependency check for the
+shared data plane. It returns `200` with `{"ok":true,"checks":{"database":{"ok":true,
+"field_definitions":32},"duration_ms":4}}`, but it is not a bare liveness ping: its database
+check reads a seeded field-definition row known to exist. Every vault table has RLS enabled with no
+policies, so a role without `BYPASSRLS` can receive `[]` from every query while status codes remain
+`200`; a bare success response would make an empty database and an unreadable one indistinguishable.
+`field_definitions` is never legitimately empty, so zero is a positive signal of that access
+failure rather than a misleading healthy result.
+
 So `connect.health` counts rows *through the views you read*:
 
 ```bash
@@ -244,10 +253,12 @@ Honest status, so you can plan around it:
   fallback. The certificate is renewed daily by `tailscale-cert.timer` at 04:40 and expires
   2026-12-10; use the full name, because MagicDNS resolving `edaserver` does not make that short
   name eligible for a valid certificate.
-- **`/healthz` and `/api/*` are not working application endpoints yet.** Caddy routes them to
-  `127.0.0.1:8099` for `vault-api`, which is not installed, so they return `502`. That is expected
-  and does not affect the data plane; treating it as a failure of `/rest/v1/*` or `/storage/v1/*`
-  would misdiagnose an absent service as a broken measurement endpoint.
+- **`/healthz` and `/api/*` are live application endpoints.** Caddy routes them to loopback-only
+  `127.0.0.1:8099`, where `vault-api` runs as `vaultsvc`; it holds a `vault_service` token with
+  `BYPASSRLS` and can write the vault schema, which is why it is confined to loopback behind two
+  proxies. `/healthz` is the meaningful shared-data-plane dependency check described in §6. `/api/*`
+  returns `401` before routing, including for paths that do not exist, so a `404`/`401` probe cannot
+  establish that a route is deployed and must not be read as one.
 - **Your own database is not provisioned.** One cluster, a database per product — so agni-connect's
   own tables get their own database on the same cluster. Note that **PostgREST serves exactly one
   database**, so the instance you read `connect` from cannot also serve your tables. Either run your

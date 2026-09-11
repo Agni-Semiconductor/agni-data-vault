@@ -131,7 +131,13 @@ fi
 # fed_storage is a Starlette app served by uvicorn, and the system python 3.9.25 has neither.
 # The dependencies ARE declared -- `storage` is an optional-dependency group in server/pyproject
 # -- the venv simply was not installed with it. So this is one pip command, not a hunt.
+[ -r "$UNITSRC/pyproject.toml" ] && ok "staged pyproject.toml (the storage extra is read from it)"   || bad "no pyproject.toml at $UNITSRC -- step 2b reads the storage requirements from it"
+
 if [ -x "$VENV" ]; then
+  # Reported rather than asserted: what matters is that THIS interpreter can import the three
+  # modules, which is checked directly below. The version is here because when pip refuses a
+  # requirement the message is about the requirement, not about the interpreter that is too old.
+  ok "venv python is $("$VENV" -V 2>&1)"
   missing=""
   for m in starlette uvicorn psycopg; do
     "$VENV" -c "import $m" 2>/dev/null || missing="$missing $m"
@@ -145,6 +151,20 @@ if [ -x "$VENV" ]; then
     # here in a way it is not on the bench.
     warn "venv is missing:$missing — will install the 'storage' extra"
     INSTALL_EXTRA=1
+  fi
+
+  # DO THE EXTRACTION NOW, not in step 2b. tomllib is stdlib only from 3.11, and a venv older than
+  # that would fail here at install time -- after the JWT secret had been minted and the
+  # authenticator password set. An assertion that merely confirms the file is readable proves
+  # nothing about whether it can be read USEFULLY, so this runs the real parse and keeps the result.
+  if [ "$INSTALL_EXTRA" = 1 ]; then
+    REQS=$("$VENV" - "$UNITSRC/pyproject.toml" 2>/dev/null <<'PYEOF'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    print(" ".join(tomllib.load(f)["project"]["optional-dependencies"]["storage"]))
+PYEOF
+)
+    [ -n "$REQS" ] && ok "storage extra reads as: $REQS"       || bad "could not read the storage extra from $UNITSRC/pyproject.toml (tomllib needs python 3.11+)"
   fi
 else
   bad "no venv at $VENV, and the system python 3.9 lacks starlette/uvicorn"
@@ -238,9 +258,23 @@ restorecon -R /srv/fedbench 2>/dev/null || true
 step "2b. The fed_storage dependencies"
 # ══════════════════════════════════════════════════════════════════════════════════════════
 if [ "${INSTALL_EXTRA:-0}" = 1 ]; then
-  # As fedbackup, into fedbackup's venv. Running pip as root into somebody else's virtualenv
-  # leaves root-owned files in it that the service user then cannot update.
-  sudo -u fedbackup "$VENV" -m pip install --quiet --upgrade "$REPO/server[storage]"     && ok "installed the storage extra into the venv"     || bad "pip install failed — see above"
+  # THE THREE REQUIREMENTS, NOT THE PROJECT.
+  #
+  # `pip install "$REPO/server[storage]"` was the obvious command and the wrong one. fed_storage is
+  # not imported from an installed distribution -- the unit sets PYTHONPATH=server/src, which is
+  # how the fed-* services on this box resolve it. Installing the project would pull fed-bridge and
+  # its five runtime deps (mcp, aiomqtt, pydantic, pyyaml, structlog) into a venv other tooling
+  # runs from, for nothing, and would convert an editable install into a regular one behind
+  # whoever depends on it.
+  #
+  # $REQS was read from pyproject's `storage` extra up in the assertions, so there is exactly one
+  # declaration of these versions and this cannot drift from it.
+  #
+  # An ARRAY, not an unquoted $REQS: pathname expansion applies to the result of an expansion, and
+  # `psycopg[binary]>=3.1` is a valid glob -- `[binary]` is a character class. It survives today
+  # only because nothing in the cwd matches, which is not a property to depend on.
+  IFS=' ' read -ra REQ_ARR <<<"$REQS"
+  sudo -u fedbackup "$VENV" -m pip install --quiet --upgrade "${REQ_ARR[@]}"     && ok "installed ${#REQ_ARR[@]} requirements into the venv as fedbackup"     || bad "pip install failed -- see above"
   for m in starlette uvicorn psycopg; do
     "$VENV" -c "import $m" 2>/dev/null && ok "  import $m" || bad "  $m still missing"
   done
@@ -338,6 +372,13 @@ step "6. Start them"
 systemctl daemon-reload
 nginx -t 2>&1 | tail -2 | sed 's/^/      /'
 for s in fed-postgrest fed-storage nginx; do
+  # `enable --now` STARTS a stopped unit and does nothing to a running one. nginx on this box may
+  # already be up for something else, in which case it would keep serving without ever reading the
+  # file just dropped into conf.d -- and step 7 then fails with a connection refused on 8087 that
+  # looks like a bad proxy config rather than a config that was never loaded.
+  if [ "$s" = nginx ] && systemctl is-active --quiet nginx; then
+    systemctl reload nginx && ok "nginx was already running -- reloaded to pick up conf.d"
+  fi
   systemctl enable --now "$s" >/dev/null 2>&1
   systemctl is-active --quiet "$s" && ok "$s active" || { bad "$s failed"; journalctl -u "$s" -n 8 --no-pager | sed 's/^/      /'; }
 done

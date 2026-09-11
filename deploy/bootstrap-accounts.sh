@@ -4,6 +4,25 @@
 # Run as root (or with sudo) ON edaserver, ONCE. It is idempotent: re-running adds nothing and
 # changes nothing that already matches.
 #
+# ─── RUNNING IT FROM YOUR LAPTOP, WHICH IS THE NORMAL CASE ─────────────────────────────────
+#
+# This script runs ON THE SERVER, because that is where the accounts go. The public key does NOT
+# have to be on the server -- pass it inline and nothing but this script is ever copied across:
+#
+#   scp deploy/bootstrap-accounts.sh edaserver:/tmp/
+#   ssh -t edaserver "sudo bash /tmp/bootstrap-accounts.sh --dry-run --key 'ssh-ed25519 AAAAC3Nz... owen-claude'"
+#   ssh edaserver "rm /tmp/bootstrap-accounts.sh"       # nothing left behind
+#
+# `ssh -t` allocates a terminal so sudo can prompt for a password. Do NOT pipe this script into
+# `sudo bash -s` over ssh: the script and sudo's password prompt would both be reading the same
+# stdin, and what happens then depends on which gets there first.
+#
+# Quote the key in SINGLE quotes. It contains spaces, and an unquoted key arrives as three
+# arguments -- the script would take the first word as the whole key and write a line sshd
+# silently ignores.
+#
+# `--key-file` is for when you are already sitting on the server with the key in a file.
+#
 #   sudo bash bootstrap-accounts.sh --key 'ssh-ed25519 AAAA... comment'
 #   sudo bash bootstrap-accounts.sh --key-file ./id.pub --no-sudo      # see "the sudo question"
 #   sudo bash bootstrap-accounts.sh --key-file ./id.pub --dry-run
@@ -73,14 +92,26 @@ TOUCHES=(
   "/etc/vault"
 )
 
-[ "$(id -u)" = "0" ] || { echo "run as root (sudo bash $0 ...)" >&2; exit 2; }
+# ARGUMENTS FIRST, root second. Being sent to fetch sudo and only then told the key was
+# malformed wastes the one round trip that costs somebody a typed password.
 [ -n "$KEY" ] || { echo "--key or --key-file is required: the deploy account is useless without one" >&2; exit 2; }
+# A PRIVATE key pasted by mistake must never reach authorized_keys, where it would be both
+# useless and disclosed.
+case "$KEY" in
+  *PRIVATE\ KEY*) echo "that is a PRIVATE key. Refusing. You want the .pub file." >&2; exit 2 ;;
+esac
 case "$KEY" in
   ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*\ *) : ;;
   # Refused rather than written. A malformed authorized_keys line does not error -- sshd skips it
-  # and the login simply fails, which reads as "the key was never added".
-  *) echo "that does not look like an SSH public key -- refusing to write it" >&2; exit 2; ;;
+  # and the login simply fails, which reads as "the key was never added" and sends everyone
+  # looking in the wrong place.
+  *) echo "that does not look like an SSH public key -- refusing to write it:" >&2
+     echo "  ${KEY:0:60}" >&2
+     echo "Quote it in SINGLE quotes; unquoted, the shell splits it on its spaces." >&2
+     exit 2 ;;
 esac
+
+[ "$(id -u)" = "0" ] || { echo "run as root ON THE SERVER (sudo bash $0 ...) -- see the header for the scp recipe" >&2; exit 2; }
 
 say() { printf '  %s\n' "$*"; }
 run() { if [ "$DRY" -eq 1 ]; then printf '  would: %s\n' "$*"; else "$@"; fi; }

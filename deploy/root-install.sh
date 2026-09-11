@@ -404,6 +404,12 @@ cat <<'UNDO'
   rm -f /etc/systemd/system/fed-{postgrest,storage}.service /etc/nginx/conf.d/nginx-fedbench.conf
   rm -f /usr/local/bin/postgrest
   systemctl daemon-reload
+  # The two SELinux changes are PERSISTENT (-P, and the port label is in the policy store), so
+  # they survive a reboot and outlive everything above. Leaving them costs nothing and reverting
+  # them is safe only if nothing ELSE on this box now needs them -- httpd_can_network_connect in
+  # particular is a box-wide boolean, not a per-service one, so check before turning it off.
+  #   semanage port -d -t http_port_t -p tcp 8087
+  #   setsebool -P httpd_can_network_connect 0     # only if no other httpd here proxies anywhere
   # /srv/fedbench and the secrets.env line are left deliberately -- removing them loses the
   # object root and the authenticator password, neither of which is recreated by a re-run.
 UNDO

@@ -1,6 +1,17 @@
 export type CohortGroup = { group_value:string|null; n_members:number; n_with_metric:number; n_no_metric_row:number; n_refused:number; status_confirmed:number; status_assumed:number; status_unknown:number; status_unspecified:number; min_value:number|null; q1:number|null; median:number|null; q3:number|null; max_value:number|null; mean:number|null; stddev:number|null }
 export type GroupKey = { key:string; label:string; entity:'sample'|'measurement'; status_key:string|null; value_kind:'categorical'|'continuous'; unit:string|null; notes:string|null }
 export type MetricDefinition = { metric:string; label:string; unit:string|null; log_scale:boolean; notes:string|null }
+// E5's continuous view. `fit_space` is the DATABASE's decision (metric_definitions.log_scale),
+// carried in the payload so a slope is never read in the wrong space -- a log10_y slope is
+// decades per x unit, and reading it as the metric's own unit is a 10^n error in a caption.
+export type CorrelationFit = { slope:number; intercept:number; r2:number; n:number; avg_x:number; avg_y:number; sxx:number; syy:number; sxy:number }
+// TWO ledgers, and both are checked in the UI. The outer one accounts for every member; the
+// inner one accounts for every member that HAS a metric but still did not reach the fit.
+export type CorrelationLedger = { n_members:number; n_with_metric:number; n_no_metric_row:number; n_refused:number; n_no_x:number; n_nonpositive_y:number; n_fit:number }
+// `y` is RAW, always -- the chart owns the axis. The fit's coefficients are in fit space.
+export type CorrelationPoint = { measurement_id:string; x:number; y:number; status:string }
+export type CorrelationResult = { metric:string; group_by:string; fit_space:'log10_y'|'raw'|null; x_unit:string|null; y_unit:string|null; ledger:CorrelationLedger; fit:CorrelationFit|null; points:CorrelationPoint[]; points_returned:number; points_sampled:boolean }
+
 export type Cohort = { id:string; slug:string|null; name:string; description:string|null; predicate:Record<string,unknown>; metric:string|null; group_by:string|null; extractor_version:string|null; created_by:string|null; updated_by:string|null; created_at:string; updated_at:string }
 
 type CohortWrite = Pick<Cohort,'name'|'predicate'> & Partial<Pick<Cohort,'description'|'slug'|'metric'|'group_by'|'extractor_version'>>
@@ -25,4 +36,7 @@ export async function getCohort(idOrSlug:string):Promise<Cohort>{return (await r
 export async function createCohort(payload:CohortWrite):Promise<Cohort>{return (await request<{cohort:Cohort}>('/cohorts',{method:'POST',body:JSON.stringify(payload)})).cohort}
 export async function updateCohort(idOrSlug:string,payload:Partial<CohortWrite>):Promise<Cohort>{return (await request<{cohort:Cohort}>(`/cohorts/${encodeURIComponent(idOrSlug)}`,{method:'PATCH',body:JSON.stringify(payload)})).cohort}
 export async function deleteCohort(idOrSlug:string):Promise<void>{await request(`/cohorts/${encodeURIComponent(idOrSlug)}`,{method:'DELETE'})}
+// The scatter may be thinned (`points_sampled`); the FIT never is. That is why the regression
+// sums travel and why nothing here refits on what arrived -- see src/pages/cohorts/fit.ts.
+export async function cohortCorrelation(payload:SummaryRequest & {max_points?:number}):Promise<CorrelationResult>{return request<CorrelationResult>('/cohorts/correlation',{method:'POST',body:JSON.stringify(payload)})}
 export async function cohortSummary(payload:SummaryRequest):Promise<CohortSummary>{return request<CohortSummary>('/cohorts/summary',{method:'POST',body:JSON.stringify(payload)})}

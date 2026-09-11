@@ -120,5 +120,27 @@ console.log('\n=== a spec with no panels is refused by the DATABASE too, not jus
   } catch (e) { ok('refused with a named field', e.status === 400 || e.status === 422, `${e.status} ${e.code}`); }
 }
 
+console.log('\n=== POST /api/cohorts/correlation — the fit, over the wire ===');
+{
+  // A uuid[] argument AND a jsonb return in one RPC. cohort_summary proved the first; this is
+  // the first call in the repo whose whole answer comes back as a single jsonb document, and
+  // supabase-js unwraps that differently from a `returns table`.
+  const r = await cohorts.correlation({ predicate: {}, metric: 'onoff', group_by: 'stack_fe_t_nm' });
+  ok('the RPC executes and returns a ledger', r.status === 200 && r.body.ledger && typeof r.body.ledger.n_fit !== 'undefined', show(r.body?.ledger));
+  const l = r.body.ledger || {};
+  ok('outer ledger balances', Number(l.n_members) === Number(l.n_with_metric) + Number(l.n_no_metric_row) + Number(l.n_refused), show(l));
+  ok('inner ledger balances', Number(l.n_with_metric) === Number(l.n_fit) + Number(l.n_no_x) + Number(l.n_nonpositive_y), show(l));
+  ok('fit_space is the metric registry decision, not a guess', r.body.fit_space === 'log10_y' || (Number(l.n_members) === 0 && r.body.fit_space === null), `${r.body.fit_space} for onoff, which is log_scale`);
+  ok('the scatter carries RAW y, never log y', (r.body.points || []).every((p) => p.y === null || typeof p.y === 'number'), show((r.body.points || []).slice(0, 2)));
+  if (r.body.fit) ok('the regression sums travel with the fit', ['sxx', 'syy', 'sxy', 'avg_x', 'n'].every((k) => k in r.body.fit), show(Object.keys(r.body.fit)));
+  else ok('no fit, and the ledger says why', Number(l.n_fit) < 3, `n_fit=${l.n_fit} — seed more members to exercise the fit`);
+}
+
+console.log('\n=== a categorical grouping key is a 422 from the API, not a 500 from Postgres ===');
+{
+  try { await cohorts.correlation({ predicate: {}, metric: 'onoff', group_by: 'fab_location' }); ok('rejected', false, 'it was accepted'); }
+  catch (e) { ok('422 naming group_by', e.status === 422 && JSON.stringify(e.details || '').includes('group_by'), `${e.status} ${e.code} ${show(e.details)}`); }
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exitCode = fail ? 1 : 0;

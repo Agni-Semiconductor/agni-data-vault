@@ -110,6 +110,7 @@ missing source from a plotting bug.
 | GET/POST | `/cohorts` | GET `q, sort, order, limit, offset`; POST `{name, predicate, metric?, group_by?, ...}` | `{items,total}` / 201 `{cohort}` |
 | GET/PATCH/DELETE | `/cohorts/:id` | `:id` = uuid **or** slug | `{cohort}` / `{deleted}` |
 | POST | `/cohorts/summary` | `{predicate, metric, group_by, extractor_version?}` or `{cohort_id}` | `{groups, total_members, excluded}` |
+| POST | `/cohorts/correlation` | same, plus `max_points?` (≤ 2000) | `{fit_space, ledger, fit, points, points_sampled}`. **Continuous grouping keys only** — a categorical key is a 422 naming `group_by`, not a cast to zero. `fit_space` is `log10_y` when the metric declares `log_scale` and `raw` otherwise; a `log10_y` slope is **decades per x unit**. Two ledgers balance: `n_members = n_with_metric + n_no_metric_row + n_refused` and `n_with_metric = n_fit + n_no_x + n_nonpositive_y`. The scatter may be thinned; **the fit never is**, so `sxx`/`syy`/`sxy`/`avg_x` travel with it and a client draws the full fit's band from a partial scatter. |
 
 Every group carries **three numbers, and a result that omits any of them is incomplete**: `n`; an
 exclusion ledger that balances (`n_members = n_with_metric + n_no_metric_row + n_refused`); and

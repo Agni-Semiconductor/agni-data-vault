@@ -49,7 +49,7 @@ describe('cohorts resource', () => {
     // SORTED: the export order is an implementation detail, but the export SET is the
     // read-only guarantee. A `createGroupKey` or `updateMetric` appearing here would mean a
     // route existed that could write a registry whose sql_expr is executable SQL.
-    expect(Object.keys(cohorts).sort()).toEqual(['create', 'get', 'list', 'registry', 'remove', 'summary', 'update']);
+    expect(Object.keys(cohorts).sort()).toEqual(['correlation', 'create', 'get', 'list', 'registry', 'remove', 'summary', 'update']);
   });
 
   it('rejects an unknown metric before reaching the RPC', async () => {
@@ -107,5 +107,73 @@ describe('an absurd population is refused, never truncated', () => {
     await expect(cohorts.summary({ predicate: {}, metric: 'onoff', group_by: 'stack_fe_t_nm' }))
       .rejects.toMatchObject({ status: 422, code: 'cohort_too_large' });
     expect(state.sb!.rpcCalls, 'the RPC must not be called with a partial population').toEqual([]);
+  });
+});
+
+describe('cohorts correlation — E5 continuous', () => {
+  const CONTINUOUS = { data: { key: 'stack_fe_t_nm', value_kind: 'continuous' }, error: null };
+  const PAYLOAD = { predicate: {}, metric: 'onoff', group_by: 'stack_fe_t_nm' };
+  const RESULT = {
+    metric: 'onoff', group_by: 'stack_fe_t_nm', fit_space: 'log10_y', x_unit: 'nm', y_unit: '',
+    ledger: { n_members: 8, n_with_metric: 6, n_no_metric_row: 1, n_refused: 1, n_no_x: 1, n_nonpositive_y: 1, n_fit: 4 },
+    fit: { slope: 0.1, intercept: 0, r2: 1, n: 4, avg_x: 25, avg_y: 2.5, sxx: 500, syy: 5, sxy: 50 },
+    points: [], points_returned: 4, points_sampled: false,
+  };
+
+  it('passes the membership and the extractor version straight to the RPC', async () => {
+    state.sb = fakeSb([...registryResults(), CONTINUOUS, { data: [{ id: IDS[0] }], error: null }, { data: RESULT, error: null }]);
+    const result = await cohorts.correlation({ ...PAYLOAD, extractor_version: 'e5' });
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(RESULT);
+    const [name, args] = state.sb.rpcCalls[0];
+    expect(name).toBe('cohort_correlation');
+    expect(args.p_measurement_ids).toEqual([IDS[0]]);
+    expect(args.p_extractor_version).toBe('e5');
+    expect(args.p_max_points).toBe(2000);
+  });
+
+  it('refuses a categorical grouping key as a 422 naming the field, without reaching the RPC', async () => {
+    // The database refuses this too. Doing it here as well is what turns a 500 into a message a
+    // user who picked "Fab location" from a dropdown can act on.
+    state.sb = fakeSb([...registryResults(), { data: { key: 'fab_location', value_kind: 'categorical' }, error: null }]);
+    await expect(cohorts.correlation({ ...PAYLOAD, group_by: 'fab_location' }))
+      .rejects.toMatchObject({ status: 422, details: [{ key: 'group_by' }] });
+    expect(state.sb.rpcCalls).toEqual([]);
+  });
+
+  it('refuses a max_points above the cap rather than quietly clamping it', async () => {
+    // Clamping would answer a request for 50,000 points with 2,000 and say nothing, and the
+    // caller would draw a scatter believing it held everything.
+    state.sb = fakeSb([...registryResults(), CONTINUOUS]);
+    await expect(cohorts.correlation({ ...PAYLOAD, max_points: 50000 }))
+      .rejects.toMatchObject({ status: 422, details: [{ key: 'max_points' }] });
+    expect(state.sb.rpcCalls).toEqual([]);
+  });
+
+  it('rejects an unknown metric before it can reach the RPC, exactly as summary does', async () => {
+    state.sb = fakeSb([{ data: null, error: null }]);
+    await expect(cohorts.correlation({ ...PAYLOAD, metric: 'missing' }))
+      .rejects.toMatchObject({ status: 422, details: [{ key: 'metric', message: 'unknown value' }] });
+    expect(state.sb.rpcCalls).toEqual([]);
+  });
+
+  it('answers an empty population with a zeroed ledger rather than a null', async () => {
+    // A caller that has to branch on null versus a zeroed ledger will one day forget to, and the
+    // panel will render blank instead of saying that nothing matched.
+    state.sb = fakeSb([...registryResults(), CONTINUOUS, { data: [], error: null }]);
+    const result = await cohorts.correlation(PAYLOAD);
+    expect(state.sb.rpcCalls).toEqual([]);
+    expect(result.body.ledger).toEqual({ n_members: 0, n_with_metric: 0, n_no_metric_row: 0, n_refused: 0, n_no_x: 0, n_nonpositive_y: 0, n_fit: 0 });
+    expect(result.body.fit).toBeNull();
+    expect(result.body.points).toEqual([]);
+  });
+
+  it('resolves a saved cohort the same way summary does', async () => {
+    state.sb = fakeSb([{ data: COHORT, error: null }, ...registryResults(), CONTINUOUS, { data: [{ id: IDS[0] }], error: null }, { data: RESULT, error: null }]);
+    await cohorts.correlation({ cohort_id: UUID });
+    const [, args] = state.sb.rpcCalls[0];
+    expect(args.p_metric).toBe('onoff');
+    expect(args.p_group_by).toBe('stack_fe_t_nm');
+    expect(args.p_extractor_version).toBe('e5');
   });
 });

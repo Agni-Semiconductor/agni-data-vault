@@ -57,7 +57,7 @@ create table if not exists vault.cohort_group_keys (
 );
 
 insert into vault.cohort_group_keys (key, label, entity, sql_expr, status_key, value_kind, unit, notes) values
-  ('pad_area_um2',      'Pad area',        'measurement', 'm.pad_area_um2::text',   'pad_dim_um',       'continuous', 'um',
+  ('pad_area_um2',      'Pad area',        'measurement', 'm.pad_area_um2::text',   'pad_dim_um',       'continuous', 'um2',
    'GENERATED from pad_shape and pad_dim_um, so its provenance is the provenance of pad_dim_um. Square pads are A = L^2, not pi*r^2.'),
   ('pad_dim_um',        'Pad dimension',   'measurement', 'm.pad_dim_um::text',     'pad_dim_um',       'continuous', 'um', null),
   ('pad_shape',         'Pad shape',       'measurement', 'm.pad_shape',            'pad_shape',        'categorical', null, null),

@@ -53,6 +53,13 @@ insert into vault.units (unit, quantity, si_factor, label) values
   ('m',      'length',          1,     'metre'),
   ('um',     'length',          1e-6,  'micrometre'),
   ('nm',     'length',          1e-9,  'nanometre'),
+  -- Area is its own quantity, and um2 is NOT convertible to um. 0113 originally labelled the
+  -- `pad_area_um2` grouping key 'um' -- harmless while nothing read it, wrong the moment 0117
+  -- put that label on an axis: a pad-area axis reading "um" invites a reader to compare it with
+  -- a pad-dimension axis, and the numbers differ by a squaring.
+  ('um2',    'area',            1e-12, 'square micrometre'),
+  ('cm2',    'area',            1e-4,  'square centimetre'),
+  ('m2',     'area',            1,     'square metre'),
   ('degC',   'temperature',     1,     'degree Celsius'),
   ('',       'dimensionless',   1,     'dimensionless')
 on conflict (unit) do nothing;

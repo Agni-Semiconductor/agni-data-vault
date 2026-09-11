@@ -16,6 +16,19 @@ const MEMBERSHIP_PAGE_SIZE = 1000;
 // real (the vault holds ~2,106 measurements), so hitting it means a predicate matched much more
 // than its author expected -- which is itself worth being told.
 const MEMBERSHIP_CAP = 50000;
+// The scatter is capped because it travels to a browser and gets drawn; the FIT is never
+// capped, which is why the regression sums come back separately. 2000 marks is already past the
+// point where a scatter reads as a cloud rather than as points.
+const MAX_SCATTER_POINTS = 2000;
+// Same shape the RPC returns for a population it found nothing in, built here because the RPC is
+// never called with an empty id array. A caller that has to branch on `null` versus a zeroed
+// ledger will eventually forget to, and then "no members" renders as a blank panel with no
+// explanation instead of as a stated finding.
+const emptyCorrelation = (config) => ({
+  metric: config.metric, group_by: config.group_by, fit_space: null, x_unit: null, y_unit: null,
+  ledger: { n_members: 0, n_with_metric: 0, n_no_metric_row: 0, n_refused: 0, n_no_x: 0, n_nonpositive_y: 0, n_fit: 0 },
+  fit: null, points: [], points_returned: 0, points_sampled: false,
+});
 const actorFor = (body, principal) => principal?.kind === 'human' ? principal.actor : body?.created_by ?? principal?.actor ?? 'api';
 
 function validationError(key, message) { return new ApiError(422, 'validation_failed', 'Validation failed', [{ key, message }]); }
@@ -107,13 +120,24 @@ export async function remove(idOrSlug) {
   return { status: 200, body: { deleted: true } };
 }
 
-export async function summary(body) {
+// summary() and correlation() answer the same question in two shapes, so they resolve their
+// configuration identically -- extracted rather than copied, because a predicate resolved two
+// slightly different ways is two different cohorts wearing one name.
+//
+// Membership is NOT resolved here, deliberately. It is the expensive half (keyset paging over
+// every matching measurement) and correlation() has one more request to refuse first.
+async function resolveConfig(body) {
   requireBody(body);
   const saved = body.cohort_id == null ? null : await resolveCohort(body.cohort_id);
   const config = saved || body;
   validatePredicate(config.predicate);
   await requireRegistryValue('metric_definitions', 'metric', config.metric, 'metric');
   await requireRegistryValue('cohort_group_keys', 'key', config.group_by, 'group_by');
+  return config;
+}
+
+export async function summary(body) {
+  const config = await resolveConfig(body);
   const ids = await resolveMembership(config.predicate);
   if (!ids.length) return { status: 200, body: { groups: [], total_members: 0, excluded: 0 } };
   const { data, error } = await supabaseAdmin().rpc('cohort_summary', {
@@ -127,4 +151,37 @@ export async function summary(body) {
     total_members: groups.reduce((total, group) => total + Number(group.n_members), 0),
     excluded: groups.reduce((total, group) => total + Number(group.n_no_metric_row) + Number(group.n_refused), 0),
   } };
+}
+
+// E5's continuous view. The FIT SPACE is the database's decision, not this layer's and not the
+// browser's: `cohort_correlation` reads metric_definitions.log_scale and returns `fit_space`
+// alongside the coefficients, so a slope can never be read in the wrong space by a caller that
+// guessed. This function's whole job is to refuse the requests SQL should not have to.
+//
+// A categorical group key is refused HERE as a 422 naming the field, rather than being allowed
+// through to the RPC's own exception -- the database check stays as the backstop, but a user who
+// picked "Fab location" from a dropdown deserves a validation error, not a 500.
+export async function correlation(body) {
+  const config = await resolveConfig(body);
+  const maxPoints = config.max_points === undefined ? MAX_SCATTER_POINTS : Number(config.max_points);
+  if (!Number.isInteger(maxPoints) || maxPoints < 1 || maxPoints > MAX_SCATTER_POINTS) {
+    throw validationError('max_points', `must be an integer between 1 and ${MAX_SCATTER_POINTS}`);
+  }
+  // BEFORE resolveMembership, which pages over every matching measurement. A request that cannot
+  // be answered should not first cost a full population scan -- and the mocked test caught this
+  // the other way round, with the membership query consuming the answer meant for this one.
+  const { data: key, error: keyError } = await supabaseAdmin()
+    .from('cohort_group_keys').select('key,value_kind').eq('key', config.group_by).maybeSingle();
+  if (keyError) throw dbError(keyError);
+  if (key?.value_kind !== 'continuous') {
+    throw new ApiError(422, 'validation_failed', 'Validation failed', [{ key: 'group_by', message: 'a correlation needs a continuous grouping key; this one is categorical' }]);
+  }
+  const ids = await resolveMembership(config.predicate);
+  if (!ids.length) return { status: 200, body: emptyCorrelation(config) };
+  const { data, error } = await supabaseAdmin().rpc('cohort_correlation', {
+    p_measurement_ids: ids, p_metric: config.metric, p_group_by: config.group_by,
+    p_extractor_version: config.extractor_version ?? null, p_max_points: maxPoints,
+  });
+  if (error) throw dbError(error);
+  return { status: 200, body: data };
 }

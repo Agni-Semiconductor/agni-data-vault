@@ -13,6 +13,7 @@ import { Readable } from 'node:stream'; import { requireAuth } from './_lib/auth
 // Anything added here needs the same argument made for it in a review, not in passing.
 const READONLY_SAFE_POST = new Set([
   'cohorts/summary',
+  'cohorts/correlation',
   // The search agent computes a filter and writes only its own audit row. Refusing it under the
   // read-only flag would leave phase 2 unable to exercise the feature against real schema, which
   // is the one thing a shakedown deploy is for. `search/<id>/accepted` is NOT here: it updates a

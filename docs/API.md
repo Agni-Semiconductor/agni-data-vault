@@ -63,6 +63,96 @@ Client: `VITE_API_BASE_URL` only, and it is not secret. Removed: `VITE_SUPABASE_
 | PATCH/DELETE | `/option-values/:id` | DELETE = `active=false` | |
 | GET | `/stats` | — | `{samples, measurements, files, bytes, by_kind:{dciv:n,...}, recent:[{measurement_id,sample_id,measured_on,kind}]}` |
 
+| GET | `/me` | — | `{principal:{kind,actor}}` |
+
+### Bench (read-only)
+
+The vault holds `SELECT` on the bench's tables and nothing more, and the object store refuses a
+bench write independently. The router also refuses every non-GET here — three guards saying the
+same thing, deliberately.
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| GET | `/bench/duts` | — | `{items}` |
+| GET | `/bench/runs` , `/bench/runs/:runId` | `dut_id, limit, offset` | `{items,total}` / `{run}` |
+| GET | `/bench/coverage` | `dut_id, run_id` | cells plus `legend`, `colors`, `verdict_codes` — **the palette is served with the data so the client cannot invent either**. Five classes, not six: `no_signal` and `indeterminate` both map to code 2. |
+| GET | `/bench/cells` | `dut_id, run_id, limit, offset` | `{items,total}` |
+| GET | `/bench/analysis/cells` , `/bench/lines` | | `{items,total}` |
+| GET | `/bench/captures/:captureId/content` | — | raw bytes |
+
+### Upload and review (E1)
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| POST | `/uploads/analyze` | `{paths:[...]}` | per-path evidence classes and proposed groups. **Extracts, never writes.** |
+| POST | `/uploads/commit` | `{sample_id, groups:[...]}` | writes only `confirmed` values; everything uncertain goes to the review queue |
+| GET | `/review-queue` | `status, entity, field, limit, offset` | `{items,total}` |
+| POST | `/review-queue/:id/accept` , `/review-queue/:id/reject` | | `{item}` |
+
+### Plotting and figures (E7)
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| GET | `/kinds` | — | `{items, units, column_units}` in **one** response. **Units are per COLUMN, not per axis** — the bench emits both `i_a` (amperes) and `current_mA`, and reading one as the other is a 1000× error that looks like data on a log axis. Read-only. |
+| GET/POST | `/figures` | GET `q, sort, order, limit, offset`; POST `{title, spec, description?, slug?, pinned_extractor_version?}` | `{items,total}` / 201 `{figure}` |
+| GET/PATCH/DELETE | `/figures/:id` | `:id` = uuid **or** slug | `{figure, sources}` / `{deleted}` |
+
+`GET /figures/:id` returns `sources`, so a trace pointing at a deleted file is **visible** rather
+than drawn as a blank panel. A jsonb trace cannot carry a foreign key; this is how you tell a
+missing source from a plotting bug.
+
+### Cohorts (E5)
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| GET | `/cohort-keys` | — | `{group_keys, metrics}` — migration-authored allow-lists. Read-only, and `sql_expr` is never returned. |
+| GET/POST | `/cohorts` | GET `q, sort, order, limit, offset`; POST `{name, predicate, metric?, group_by?, ...}` | `{items,total}` / 201 `{cohort}` |
+| GET/PATCH/DELETE | `/cohorts/:id` | `:id` = uuid **or** slug | `{cohort}` / `{deleted}` |
+| POST | `/cohorts/summary` | `{predicate, metric, group_by, extractor_version?}` or `{cohort_id}` | `{groups, total_members, excluded}` |
+
+Every group carries **three numbers, and a result that omits any of them is incomplete**: `n`; an
+exclusion ledger that balances (`n_members = n_with_metric + n_no_metric_row + n_refused`); and
+the **provenance of the grouping key** (`status_confirmed` / `assumed` / `unknown` /
+`unspecified`). The metric can be impeccable while the thing you grouped *by* was assumed.
+
+Membership is resolved **in full**, not one page — a median over an arbitrary 50 measurements
+looks entirely correct. Above 50,000 it refuses rather than truncating.
+
+### Devices (E4)
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| GET/POST | `/devices` | GET `sample_id, address_scheme, q, sort, order, limit, offset`; POST `{sample_id, device_address, notes?}` | `{items,total}` / 201 `{device}` |
+| GET | `/devices/:id` | — | `{device, aliases, counts}` |
+| GET | `/devices/:id/history` | `from, to, event_kind, limit<=500 (default 200), offset` | `{items,total}`, oldest first |
+| POST | `/devices/:id/aliases` | `{alias_address, alias_scheme, reason}` | 201 `{alias}`; **422 unless the principal is human** |
+| DELETE | `/devices/:id/aliases/:aliasId` | — | `{deleted}` |
+| POST | `/devices/register-bench` | `{dut_id}` | `{created}`; 422 naming `dut_id` when it is unmapped |
+| GET | `/verdict-changes` | `dut_id, direction, from, to, sort, order, limit, offset` | `{items,total}` |
+
+`POST /devices` creates a **`vault_label`** device only — `address_scheme`, `grid_row`,
+`grid_col` and `bench_dut_id` in the body are all a 422. Grid coordinates are a claim about die
+geometry and must come from `device_tests`.
+
+**An alias is the only thing that merges two device histories**, so it must carry a person: a
+machine principal is refused. The bench labels a cell `D116_116` and the vault extracts `D116`;
+merging those on a prefix would fabricate history.
+
+### Search (E6)
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| POST | `/search/ask` | `{question}` (<= 500 chars) | `{url, entity, filters, explanation, unknown_terms, query_id}` **or** `{refusal, unknown_terms, query_id}` |
+| POST | `/search/:id/accepted` | — | `{ok}` |
+| GET | `/search/history` | `q, refused, limit, offset` | `{items,total}` |
+
+**The agent reads the schema and emits a filter. It never sees a measurement row** — so a note
+reading "ignore previous instructions" has nowhere to land. **The URL is the answer**: the reply
+is a real filter you can open, edit and re-run, and the agent is never the only path to a result.
+A refusal is a correct outcome, not an error. 503 `agent_unavailable` means no API key is
+configured on that server.
+
+
 ## Worked examples
 
 Set `API=https://vault.agnisemi.ai/api` and `AUTH="Authorization: Bearer <VAULT_API_KEY>"`. Replace IDs printed by the calls.

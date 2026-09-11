@@ -162,7 +162,38 @@ step "3. The environment file"
 # that nothing here can regenerate, and silently replacing either would look like a working install
 # and behave like a revoked credential.
 if [ -s "$ENVFILE" ]; then
-  ok "$ENVFILE exists -- leaving it alone"
+  ok "$ENVFILE exists -- credentials in it are left alone"
+  # THE ONE VALUE THAT IS CORRECTED IN PLACE, because getting it wrong is silent until a request
+  # is made and then unrecognisable.
+  #
+  # VAULT_REST_URL is handed straight to supabase-js's createClient(), WHICH APPENDS /rest/v1
+  # ITSELF. Setting it to http://127.0.0.1:8087/rest/v1 therefore produces
+  # /rest/v1/rest/v1/<table>; nginx strips one prefix and PostgREST answers
+  #     PGRST125 "Invalid path specified in request URL"
+  # which names neither the variable nor the duplication. VAULT_STORAGE_URL is the OPPOSITE: it is
+  # consumed directly by api/_lib/storage.js, which appends object paths to it, so that one MUST
+  # end in /storage/v1. Two variables that look parallel and are not.
+  #
+  # Only this key is touched, and only when it is demonstrably wrong. Credentials are never
+  # rewritten -- the env file may hold a rotated VAULT_API_KEY or an ANTHROPIC_API_KEY nothing
+  # here can regenerate.
+  cur=$(grep -m1 '^VAULT_REST_URL=' "$ENVFILE" | cut -d= -f2-)
+  case "$cur" in
+    */rest/v1|*/rest/v1/)
+      cp -p "$ENVFILE" "$ENVFILE.bak.$(date +%Y%m%d%H%M%S)"
+      fixed=${cur%/}; fixed=${fixed%/rest/v1}
+      sed -i "s|^VAULT_REST_URL=.*|VAULT_REST_URL=$fixed|" "$ENVFILE"
+      ok "corrected VAULT_REST_URL to $fixed (supabase-js appends /rest/v1 itself; a backup was kept)"
+      ;;
+    "")  bad "VAULT_REST_URL is not set in $ENVFILE" ;;
+    *)   ok "VAULT_REST_URL=$cur (a base URL, as createClient expects)" ;;
+  esac
+  st=$(grep -m1 '^VAULT_STORAGE_URL=' "$ENVFILE" | cut -d= -f2-)
+  case "$st" in
+    */storage/v1|*/storage/v1/) ok "VAULT_STORAGE_URL=$st (includes the prefix, as storage.js expects)" ;;
+    "")                         bad "VAULT_STORAGE_URL is not set in $ENVFILE" ;;
+    *)                          bad "VAULT_STORAGE_URL=$st must end in /storage/v1 -- storage.js appends object paths to it and does not add the prefix" ;;
+  esac
 else
   SEC=$(grep -m1 '^PGRST_JWT_SECRET=' "$SECRETS" | cut -d= -f2- | tr -d '"')
   # A long-lived service token. Minted here rather than by tools/mint_service_jwt.py, which lives in
@@ -190,7 +221,10 @@ PYEOF
         printf '# VAULT_SERVICE_JWT holds role vault_service, which has BYPASSRLS and writes every\n'
         printf '# vault table. It is signed with the shared secret in the bench secrets.env -- the\n'
         printf '# SAME secret PostgREST and fed_storage verify with. Never regenerate that secret.\n'
-        printf 'VAULT_REST_URL=http://127.0.0.1:8087/rest/v1\n'
+        # NO /rest/v1 SUFFIX. supabase-js's createClient appends it, so a suffix here produces
+        # /rest/v1/rest/v1/<table> and PostgREST answers PGRST125, "Invalid path specified in
+        # request URL" -- which names neither the variable nor the duplication.
+        printf 'VAULT_REST_URL=http://127.0.0.1:8087\n'
         printf 'VAULT_STORAGE_URL=http://127.0.0.1:8087/storage/v1\n'
         printf 'VAULT_SERVICE_JWT=%s\n' "$TOKEN"
         printf 'VAULT_API_KEY=%s\n' "$APIKEY"

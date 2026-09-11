@@ -263,7 +263,7 @@ it as `EnvironmentFile` and the deploy account never needs to see it. **Nothing 
 
 | var | live value or source | what breaks without it, and the misleading symptom |
 |---|---|---|
-| `VAULT_REST_URL` | `http://127.0.0.1:8087/rest/v1` | PostgREST metadata and row reads use the wrong route; this looks like missing tables or a broken database. |
+| `VAULT_REST_URL` | `http://127.0.0.1:8087` | **No `/rest/v1` suffix** — supabase-js's `createClient` appends it. With a suffix the request becomes `/rest/v1/rest/v1/<table>` and PostgREST answers `PGRST125`, "Invalid path specified in request URL", which names neither the variable nor the duplication. Note `VAULT_STORAGE_URL` is the opposite: `api/_lib/storage.js` uses it directly, so it keeps its prefix. |
 | `VAULT_STORAGE_URL` | `http://127.0.0.1:8087/storage/v1` | Object uploads and downloads use the wrong route; this looks like missing or corrupt files. |
 | `VAULT_SERVICE_JWT` | Existing HS256 token with `role=vault_service`, signed with the shared secret in `secrets.env` | PostgREST and object-store authorization fails. Never regenerate the shared secret: metadata can still work while downloads return 401, which looks like a corrupt archive. |
 | `VAULT_API_KEY` | One shared static key for machine clients and break-glass access | Machine authentication returns 500/401; this looks like an API outage rather than a missing server credential. |

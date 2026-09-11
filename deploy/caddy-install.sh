@@ -130,14 +130,20 @@ step "2. The renewal parameters"
 # Caddy is not looking -- which works right up until the current one expires, 90 days later, with
 # nothing in between to suggest a problem. tests/deployCertPaths.test.ts pins the repo copies
 # agreeing; this step is what makes the INSTALLED copies agree, by deriving both from here.
-umask 077
-{
-  printf '# Written by caddy-install.sh. These MUST match the tls line in /etc/caddy/Caddyfile.\n'
-  printf 'TAILSCALE_CERT_DOMAIN=%s\n' "$DOMAIN"
-  printf 'TAILSCALE_CERT_PATH=%s\n' "$CERT"
-  printf 'TAILSCALE_KEY_PATH=%s\n' "$KEY"
-  printf 'CADDY_UNIT=caddy.service\n'
-} > "$ENVFILE"
+# A SUBSHELL, so the umask does not leak. The first version set `umask 077` here and never
+# reset it, so every file created later in this script was 0600 root-owned -- including the
+# access log that `caddy validate` opens in step 5, which then stopped caddy from starting
+# with a permission error naming the log file rather than the umask three steps earlier.
+(
+  umask 077
+  {
+    printf '# Written by caddy-install.sh. These MUST match the tls line in /etc/caddy/Caddyfile.\n'
+    printf 'TAILSCALE_CERT_DOMAIN=%s\n' "$DOMAIN"
+    printf 'TAILSCALE_CERT_PATH=%s\n' "$CERT"
+    printf 'TAILSCALE_KEY_PATH=%s\n' "$KEY"
+    printf 'CADDY_UNIT=caddy.service\n'
+  } > "$ENVFILE"
+)
 chmod 0640 "$ENVFILE"; chown root:root "$ENVFILE"
 ok "wrote $ENVFILE"
 
@@ -214,6 +220,33 @@ systemctl daemon-reload
 systemctl enable --now tailscale-cert.timer >/dev/null 2>&1
 systemctl is-enabled --quiet tailscale-cert.timer && ok "tailscale-cert.timer enabled" \
   || bad "tailscale-cert.timer is not enabled -- the certificate will expire in 90 days with no warning"
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+step "6b. The access log, owned by the user that writes it"
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# `caddy validate` runs as ROOT and provisions the config, which OPENS the log file. So by the time
+# caddy starts as the caddy user, the file already exists owned by root, and caddy cannot write it:
+#
+#     open /var/log/caddy/vault-access.log: permission denied
+#
+# which reads as a directory-permissions problem. The DIRECTORY was always fine; the FILE was not,
+# and it was created by the validation step three lines earlier. Scoping the umask above stops it
+# being 0600, but not root-owned -- validate runs as root either way. So the file is created and
+# chowned explicitly here rather than left to whichever process touches it first.
+LOGFILE=$(sed -n 's/^[[:space:]]*output file[[:space:]]*\(.*\)$//p' /etc/caddy/Caddyfile | head -1)
+if [ -n "$LOGFILE" ]; then
+  install -d -m 0755 -o "$grp" -g "$grp" "$(dirname "$LOGFILE")"
+  [ -e "$LOGFILE" ] || : > "$LOGFILE"
+  chown "$grp:$grp" "$LOGFILE" && chmod 0640 "$LOGFILE"
+  restorecon "$LOGFILE" 2>/dev/null || true
+  actual=$(stat -c '%U:%G %a' "$LOGFILE" 2>/dev/null)
+  case "$actual" in
+    "$grp:$grp "*) ok "access log $LOGFILE is $actual" ;;
+    *)             bad "access log $LOGFILE is $actual -- caddy runs as $grp and cannot write it" ;;
+  esac
+else
+  warn "no 'output file' directive in the Caddyfile -- caddy logs to stderr and the journal"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 step "7. Start Caddy"

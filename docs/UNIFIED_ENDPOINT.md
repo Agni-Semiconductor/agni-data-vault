@@ -733,6 +733,23 @@ Phase 0 is a clean install rather than a negotiation with something already runn
 mode `0750` and unreadable to anyone else — which is correct, and is why an unprivileged survey
 reports those paths as empty rather than as denied.
 
+### The second-copy gate moved, and an applied migration is immutable
+
+**The second physical copy is closer than this document said.** `/mnt/nasbackup` is an 11 T NFS
+mount to `10.10.10.50` with 6 T free, so that gate reads as "configure the copy" rather than "wait
+for hardware". The other half of the complaint stands unchanged: the archive still lives on a
+single 7.3 T disk with no redundancy.
+
+**`0108_bench_link.sql` carries the same wrong "1 TB" figure in a comment, and is being left
+alone.** The rule matters more than the comment. The chain is now applied to a real database and
+the ledger records a sha256 per file, so editing any of those files — even prose — makes the
+applier stop and report it as EDITED SINCE IT WAS APPLIED. That is the mechanism working, and it
+cannot tell a comment from a `drop table`: the moment it gets waved through with `--allow-edited`
+for "harmless" changes it stops being evidence of anything. **Migrations are history once
+applied**; corrections go in a later migration or in the documents, which is where this one is.
+The comment's conclusion — reference the bench objects rather than copying them — was right for a
+reason that had nothing to do with capacity, and that reasoning is intact.
+
 ### Phase 1 is DONE on edaserver, 2026-09-11
 
 `fedbench` exists on the PGDG 17.10 cluster, owned by `agnidata`, and the full chain is applied:
@@ -789,10 +806,9 @@ misread:
    exist. Data being present on edaserver moves nothing on that question. Nor does it satisfy the
    second-physical-copy gate — one allocation on one shared spindle is one disk.
 
-3. **Find out which volume it is on before sizing anything.** "Not necessarily where the endpoint
-   would be" is the load-bearing half of the sentence. The 1 TB figure, the cluster's data
-   directory, the object tree and the 256 GiB encrypted LVM from the `agni-connect` spec are four
-   separate claims about storage on one host, and a plan that assumes they are the same mount
-   discovers otherwise partway through a restore. `df -h`, `lsblk` and the mount options
-   (`ARCHIVE_RUNBOOK.md` §E1 records `/srv/nextcloud/fedbench` as `noquota` on a shared 8 TB
-   spindle) settle it in a minute and are worth doing before phase 0.
+3. ~~**Find out which volume it is on before sizing anything.**~~ **DONE 2026-09-11** — the
+   results are in "Verified ON THE BOX" above. The four claims really were four different volumes:
+   Postgres on mirrored `/`, the archive on an unredundant single disk, and an 11 T NAS nobody had
+   mentioned. The reasoning is worth keeping even though the question is answered — a plan that
+   assumes they are one mount discovers otherwise partway through a restore, with the restore
+   holding the disk.

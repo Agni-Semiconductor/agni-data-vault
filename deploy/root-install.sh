@@ -155,17 +155,49 @@ fi
 # said `User=testingboard` and `/home/testingboard` -- written for the Pi, months after the target
 # moved. Installing those gives two services that fail to start for reasons that read as a broken
 # host rather than a stale file.
+#
+# IT CHECKS DIRECTIVES, NOT TEXT, and the first version of THIS got that wrong too: a plain
+# `grep testingboard` flagged both units over the comments explaining that they no longer say it.
+# A file documenting a mistake has to be able to name the mistake -- the same reason
+# tests/envVarParity.test.ts matches instruction FORMS rather than any mention. So: strip comments
+# and blank lines, then assert over what systemd will actually read.
+directives() { grep -vE '^[[:space:]]*(#|;|$)' "$1"; }
+
 for u in fed-postgrest.service fed-storage.service nginx-fedbench.conf; do
   f="$UNITSRC/$u"
   [ -r "$f" ] || { bad "missing $f -- stage it there before running this"; continue; }
   ok "staged $u"
-  grep -q 'testingboard' "$f" && bad "  $u still names testingboard -- this is the Pi version"
+  # Nothing systemd or nginx acts on may point into /home. That covers /home/testingboard without
+  # depending on the old username, and it also catches a path left pointing at an operator's home
+  # directory -- which works until that operator is gone.
+  stray=$(directives "$f" | grep -nE '/home/' | head -3)
+  [ -n "$stray" ] && { bad "  $u has a directive under /home:"; printf '%s
+' "$stray" | sed 's/^/        /'; }
 done
+
+for u in fed-postgrest.service fed-storage.service; do
+  f="$UNITSRC/$u"
+  [ -r "$f" ] || continue
+  who=$(directives "$f" | grep -m1 '^User=' | cut -d= -f2-)
+  [ "$who" = fedbackup ] && ok "  $u runs as fedbackup" || bad "  $u runs as '${who:-<unset>}', not fedbackup"
+  for k in WorkingDirectory EnvironmentFile; do
+    # `done < <(...)`, NOT `... | while`. A piped while runs in a SUBSHELL, so every bad() inside
+    # it increments a copy of $fail that the caller never sees -- the run prints FAIL and then
+    # reports all assertions passing. That exact shape already bit the validation probe once.
+    while read -r v; do
+      case "$v" in
+        "$REPO"*) : ;;
+        *) bad "  $u $k=$v is outside $REPO" ;;
+      esac
+    done < <(directives "$f" | grep "^$k=" | cut -d= -f2-)
+  done
+done
+
 # fed_storage is imported by whatever interpreter ExecStart names, and THAT is the one whose
 # dependencies matter. Checking `.venv/bin/python` while the unit runs `/usr/bin/python3` is
 # verifying one thing and shipping another -- which is exactly what this file did.
 if [ -r "$UNITSRC/fed-storage.service" ]; then
-  exe=$(grep -m1 '^ExecStart=' "$UNITSRC/fed-storage.service" | cut -d= -f2- | awk '{print $1}')
+  exe=$(directives "$UNITSRC/fed-storage.service" | grep -m1 '^ExecStart=' | cut -d= -f2- | awk '{print $1}')
   if [ "$exe" = "$VENV" ]; then
     ok "fed-storage runs the venv interpreter ($exe)"
   else

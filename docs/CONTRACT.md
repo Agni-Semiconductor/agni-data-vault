@@ -625,3 +625,89 @@ argument made for it explicitly, in review.**
 a fit (OLS on raw values? on log10 of a log-scale metric? weighted by n?) is a statistics
 decision with a right answer per metric, not a worker's call. `cohort_summary` returns the
 distribution per group; the fit is specified separately once that choice is made.
+
+
+## v2.14 The device dimension (new section — E4)
+
+Migration `0114` gives a physical device an identity, and therefore a history. Before it, nothing
+tied repeated measurements of one device together: the vault had `measurements.device_address` as
+free text, the bench had `(dut_id, grid_row, grid_col)`. "How did this cell drift across five
+runs" was unanswerable — not because the data was missing, but because nothing joined it.
+
+### Identity is the whole feature, and it is not a join condition
+
+The two systems address devices **differently, and neither is wrong**:
+
+- The bench labels a cell **`D{row}_{col}`** — `D116_116` is row 116, column 116. Verified
+  against the committed reference run, whose `summary.json` carries
+  `best_cell: {"cell": "D116_116", "row": 116, "col": 116}`.
+- The vault extracts `device_address` with `/^[A-Z]\d{1,3}$/` — a letter and up to three digits,
+  so `D2`, `D116`. It **cannot** produce `D116_116`; feed that string to the extractor and you
+  get `D116`.
+
+So a vault measurement labelled `D116` and a bench cell labelled `D116_116` might be one device
+or two unrelated things, and nothing available can tell. **Merging them on a prefix would
+fabricate device history** — silently attributing one device's measurements to another, which is
+worse than no history, because a history is exactly the evidence nobody re-derives.
+
+The sure-only rule, applied to identity:
+
+| | resolves how | automatic? |
+|---|---|---|
+| `bench_grid` | `(dut_id, grid_row, grid_col)` → sample via `dut_sample_map`, address `D{row}_{col}` | **Yes** — exact, no inference |
+| `vault_label` | the literal `device_address` on its sample | Yes, literal only |
+| across schemes | **only** a row in `vault.device_aliases`, carrying `confirmed_by` | **Never automatic** |
+
+`device_aliases.confirmed_by` is NOT NULL with no default, and the table has **no UPDATE grant**
+(enforced by an explicit `REVOKE` — see below). An alias is a signed statement: editing one in
+place would leave a name attached to a claim that person never made. Withdraw and rewrite.
+
+**No route may create an alias without a real principal behind it.** A machine principal's
+`created_by` is not a confirmation — an alias asserted by `'api'` is an inference wearing a
+signature. If a route cannot name a human, it must refuse.
+
+### New routes
+
+| Method | Path | Query / body | Returns |
+|---|---|---|---|
+| GET | `/api/devices` | `sample_id, address_scheme, q, sort, order, limit<=200 (default 50), offset` | `{items,total}` |
+| GET | `/api/devices/:id` | — | `{device, aliases:[…], counts:{measurements,bench_cells}}` |
+| GET | `/api/devices/:id/history` | `from, to, event_kind, limit<=500 (default 200), offset` | `{items,total}` — from `vault.device_history`, oldest first |
+| POST | `/api/devices` | `{sample_id, device_address, notes?}` — creates a **`vault_label`** device only | 201 `{device}` |
+| POST | `/api/devices/:id/aliases` | `{alias_address, alias_scheme, reason}` | 201 `{alias}`; **422 unless the principal is human** |
+| DELETE | `/api/devices/:id/aliases/:aliasId` | — | `{deleted}` |
+| POST | `/api/devices/register-bench` | `{dut_id}` | `{created}` — calls `vault.register_bench_devices` |
+| GET | `/api/verdict-changes` | `dut_id, direction, from, to, limit<=500 (default 200), offset` | `{items,total}` |
+
+`POST /api/devices` creates a `vault_label` device only. A `bench_grid` device carries grid
+coordinates that must come from `device_tests`, not from a request body — a hand-entered row/col
+is a claim about die geometry with nothing behind it. Bench devices arrive through
+`register-bench`, which refuses an unmapped `dut_id` rather than inventing a sample.
+
+### `/api/devices/:id/history` must paginate, and must stay per-device
+
+A full 128×128 campaign is **16,384 cells per run**. `vault.device_history` is a union across
+every device; an unfiltered read is the whole bench. The route always filters to one device and
+always paginates — the same discipline the bench viewer uses, and the reason `device_tests` is
+paged at 100 there.
+
+### Verdict changes
+
+`vault.device_verdict_changes` reports every cell whose verdict differed from its own previous
+run, with a `direction` of `degraded` / `recovered` / `changed`. It **reports rather than
+filters**: a cell going `normal → short` is a device failure, while `short → normal` is usually a
+measurement problem rather than a device healing, and both are worth seeing.
+
+It orders by the **cell's own `started_at`**, never by anything on `campaign_runs` —
+`n_measured` and the run-level counts are written at the *end* of a run, so a live campaign reads
+0 with tens of thousands of child rows.
+
+### The schema trap this section exists to repeat
+
+`0102` runs `alter default privileges in schema vault grant select, insert, update, delete on
+tables to vault_service`. **Every table created in this schema afterwards is fully writable by
+the service role before any grant in a later migration runs**, so writing a narrow `GRANT SELECT`
+achieves nothing — the privilege must be `REVOKE`d. This has now been hit twice: once on
+`cohort_group_keys` in `0113`, and again on `device_aliases` in `0114`, where the comment said
+"no UPDATE grant on purpose" while UPDATE was in fact granted. **Any read-only or append-only
+table in `vault` needs an explicit REVOKE, and it always fails permissive.**

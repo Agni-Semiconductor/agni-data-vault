@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
-"""Register finished bench campaigns as vault measurements.
-
-NOT YET FUNCTIONAL, and it says so rather than half-working. Every invocation currently exits 1
-with `failure=mapping_unavailable`, because the one thing it cannot do without guessing does not
-exist yet: there is no API route that reads vault.dut_sample_map.
-
-That mapping is the whole point. A bench DUT id (`2kb-dut-01`) and a vault sample id (a registry
-key) are unrelated namespaces, and a derivation that works for today's names silently
-misattributes measurements the first time somebody names a board differently. Misattributed data
-that looks confirmed is worse than data that is absent, so this refuses rather than infers.
-
-What the missing route must provide, so whoever adds it does not have to re-derive it:
-  * a read of vault.dut_sample_map, returning sample_id for a dut_id;
-  * upsert semantics keyed on (bench_run_id, bench_dut_id), so a 15-minute timer registering the
-    same finished run twice does not create a second measurement;
-  * a body that sets ONLY kind, measured_on, instrument and measured_by. Everything else stays
-    `unknown` for a human or a sure-only backfill.
-
-The rest of the script -- the status filter, the refusal to read campaign_runs.n_measured, the
-dry-run path -- is written and carries its reasoning in comments. It is kept here so that
-reasoning is not re-derived, not because it runs today.
-"""
+"""Register finished bench campaigns as vault measurements."""
 import argparse
 import os
 import sys
@@ -99,6 +78,36 @@ def bench_runs(client):
             return
 
 
+def existing_measurement(client, sample_id, run_id, dut_id):
+    # Both halves of the bench key are required: run IDs are unique only with their DUT, and
+    # checking one half can report an unrelated board as already registered.
+    page = client.get(
+        "/api/samples/" + sample_id + "/measurements",
+        {"meta.bench_run_id": run_id, "meta.bench_dut_id": dut_id, "limit": 1},
+    )
+    return bool(page.get("items", []))
+
+
+def measurement_body(run):
+    completed_at = run.get("completed_at")
+    # measured_on is required by the measurement API. Taking the calendar date from the completed
+    # timestamp preserves the recorded event date; using today's date would make an old run look new.
+    if not isinstance(completed_at, str) or len(completed_at) < 10:
+        return None
+    body = {
+        "measured_on": completed_at[:10],
+        "bench_run_id": run.get("run_id"),
+        "bench_dut_id": run.get("dut_id"),
+    }
+    # Set only kind, measured_on, instrument, and measured_by. Everything else stays `unknown`
+    # for a human or a sure-only backfill -- a guessed value that looks confirmed is worse than an
+    # absent one.
+    for destination, source in (("kind", "kind"), ("instrument", "instrument"), ("measured_by", "operator")):
+        if run.get(source) is not None:
+            body[destination] = run[source]
+    return body
+
+
 def main(argv=None):
     globals_, rest = extract_globals(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -108,33 +117,66 @@ def main(argv=None):
         return exc.code
 
     client = VaultClient(globals_.api_url, globals_.api_key)
-    created = present = skipped = 0
+    created = present = skipped = unmapped = 0
     try:
         runs = list(bench_runs(client))
         if not runs:
-            print("created=0 already-present=0 skipped=0")
+            print("created=0 already-present=0 skipped=0 unmapped=0")
             return 0
 
         # DUT identifiers and registry sample identifiers are unrelated namespaces. Deriving a
         # sample_id from a name that happens to match today silently misattributes a differently
         # named board later, so this must read vault.dut_sample_map explicitly.
-        #
-        # The documented API has no route to read that mapping table. /devices/register-bench
-        # confirms a mapping only by registering devices and returns no sample_id, so it cannot
-        # supply the target sample for a measurement without inventing an API contract.
-        # A future API route must make registration idempotent on bench_run_id plus bench_dut_id;
-        # otherwise a timer registering the same run twice creates a second measurement.
-        # Its POST body must set only kind, measured_on, instrument, and measured_by from the run,
-        # plus that linkage key. Guessing any other value makes it look confirmed, which is worse
-        # than leaving it unknown for a human or a sure-only backfill to fill in.
-        skipped = len(runs)
-        raise ApiError("mapping_unavailable", "no API route exposes vault.dut_sample_map")
+        mappings = {mapping["dut_id"]: mapping["sample_id"] for mapping in client.get("/api/bench/dut-map").get("items", [])}
+        for run in runs:
+            dut_id, run_id = run.get("dut_id"), run.get("run_id")
+            sample_id = mappings.get(dut_id)
+            if not sample_id:
+                # A missing map is reported and skipped, never derived: a plausible name-based
+                # match silently attributes measurements to the wrong physical sample.
+                unmapped += 1
+                print("unmapped dut_id=%s run_id=%s" % (dut_id, run_id), file=sys.stderr)
+                continue
+            body = measurement_body(run)
+            if not body or not run_id or not dut_id:
+                # Do not manufacture a required date or a foreign-key pair; a fake value would
+                # make malformed source data look like a valid completed campaign.
+                skipped += 1
+                print("skipped dut_id=%s run_id=%s reason=missing_required_run_fields" % (dut_id, run_id), file=sys.stderr)
+                continue
+            # Registration is idempotent, keyed on the bench run and DUT, so a 15-minute timer
+            # cannot create duplicates. Checking first avoids using a conflict as routine control flow.
+            if existing_measurement(client, sample_id, run_id, dut_id):
+                present += 1
+                continue
+            if globals_.dry_run:
+                # --dry-run writes nothing and is the documented first step.
+                print("would-create dut_id=%s run_id=%s sample_id=%s" % (dut_id, run_id, sample_id))
+                created += 1
+                continue
+            try:
+                client.post("/api/samples/" + sample_id + "/measurements", body)
+                created += 1
+            except ApiError as exc:
+                # The unique index is the final idempotency guard when two timer invocations
+                # inspect before either inserts; reporting it as a failure would be misleading.
+                if exc.code == "conflict" and existing_measurement(client, sample_id, run_id, dut_id):
+                    present += 1
+                else:
+                    raise
     except ApiError as exc:
         # Do not use campaign_runs.n_measured as a proxy for child rows: it is written only at
         # the end of a run, so a live campaign with many device_tests misleadingly reports zero.
         # This script needs no count; a future implementation must count device_tests instead.
-        print("created=%d already-present=%d skipped=%d failure=%s" % (created, present, skipped, exc.code))
+        print("created=%d already-present=%d skipped=%d unmapped=%d failure=%s" % (created, present, skipped, unmapped, exc.code))
         return 1
+    except requests.RequestException:
+        # A transport failure has no API error body; still print the counters so an unattended
+        # timer does not look successful merely because its HTTP request never reached the vault.
+        print("created=%d already-present=%d skipped=%d unmapped=%d failure=request_error" % (created, present, skipped, unmapped))
+        return 1
+    print("created=%d already-present=%d skipped=%d unmapped=%d" % (created, present, skipped, unmapped))
+    return 0
 
 
 if __name__ == "__main__":

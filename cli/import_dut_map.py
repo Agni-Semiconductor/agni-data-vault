@@ -37,7 +37,15 @@ def validate(entries, client):
         elif sample_id in sample_ids:
             problems.append("entry " + str(index) + " repeats sample_id " + sample_id)
         else: sample_ids.add(sample_id)
-        if "note" in entry and (not isinstance(entry["note"], str) or not entry["note"].strip()):
+        # PROVENANCE IS REQUIRED, not optional-but-non-empty. A mapping with no stated basis --
+        # a board label, a fab record, a notebook entry -- is a guess that will later be read as
+        # fact, and this file is the only record of how anyone knew. The API route rejects a
+        # create without it; validating here too means --dry-run cannot report success on a
+        # file the server will refuse.
+        note = entry.get("note")
+        if note is None:
+            problems.append("entry " + str(index) + " (" + str(dut_id) + ") has no note; provenance is required -- record how this mapping was established")
+        elif not isinstance(note, str) or not note.strip():
             problems.append("entry " + str(index) + " has an empty note")
         if isinstance(dut_id, str) and dut_id.strip() and isinstance(sample_id, str) and sample_id.strip():
             valid.append({"dut_id": dut_id, "sample_id": sample_id, **({"note": entry["note"]} if entry.get("note") is not None else {})})
@@ -69,7 +77,7 @@ def main(argv=None):
     note_updates = [entry for entry in desired if entry["dut_id"] in existing_by_dut and existing_by_dut[entry["dut_id"]]["sample_id"] == entry["sample_id"] and existing_by_dut[entry["dut_id"]].get("note") != entry.get("note")]
     if remaps and not args.allow_remap:
         for entry in remaps:
-            print("REFUSE " + entry["dut_id"] + ": " + existing_by_dut[entry["dut_id"]]["sample_id"] + " -> " + entry["sample_id"] + "; re-pointing it silently re-attributes every measurement already registered through it", file=sys.stderr)
+            print("REFUSE " + entry["dut_id"] + ": " + existing_by_dut[entry["dut_id"]]["sample_id"] + " -> " + entry["sample_id"] + "; re-pointing it silently re-attributes every measurement already registered through it. Pass --allow-remap if that is intended.", file=sys.stderr)
         return 1
     if not creates and not remaps and not note_updates:
         print("UNCHANGED: all DUT-to-sample mappings already match")

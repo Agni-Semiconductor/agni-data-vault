@@ -13,6 +13,55 @@ The two certificate paths appear TWICE — in `deploy/Caddyfile` and in
 certificate somewhere Caddy is not looking, which reads as a renewal that worked right up until
 the door stops serving TLS.
 
+## Fresh-host path
+
+Run these in order on a new host. The `--check` passes are assertions only; the other scripts do
+not support that flag, so use the no-change mode they actually document where one exists.
+
+1. **Accounts and directories**
+   - Prerequisite: the SSH public key for the deployment account is available and quoted as one
+     argument; otherwise `authorized_keys` gets a truncated line that sshd silently ignores.
+   - Command: `sudo bash deploy/bootstrap-accounts.sh --dry-run --key 'ssh-ed25519 AAAA... comment'`,
+     then `sudo bash deploy/bootstrap-accounts.sh --key 'ssh-ed25519 AAAA... comment'`.
+   - Observable: `agnidata` and the `vaultsvc` nologin service account exist, with `/srv/vault`
+     owned and created as the script reports.
+2. **Migration chain**
+   - Prerequisite: the `fedbench` database already exists; this script does not create it, so a
+     missing database reads as a migration failure rather than an ordering problem.
+   - Command: `bash deploy/apply-migrations.sh --db fedbench`.
+   - Observable: the final `migrations.applied` report records the migration chain and the run says
+     `schemas present: vault, connect`; an edited file is exposed instead of silently hidden.
+3. **PostgREST, fed_storage, nginx, and SELinux**
+   - Prerequisite: the bench self-host schema has supplied the `authenticator` and `bench_read`
+     roles, and the staged units, nginx config, Python project, and PostgREST binary are at the
+     paths checked by the script; migrations alone do not create those roles.
+   - Command: `sudo bash deploy/root-install.sh --check`, then `sudo bash deploy/root-install.sh`.
+   - Observable: the script reports `fed-postgrest`, `fed-storage`, and `nginx` active, and
+     `connect.kinds` returns at least one seeded row through `127.0.0.1:8087`; an empty result
+     would be an RLS or grant failure, not proof of an empty database.
+4. **Tailnet door and certificate**
+   - Prerequisite: HTTPS Certificates are **ENABLED for the tailnet in the Tailscale admin
+     console**, before this command; otherwise `tailscale cert` names the DOMAIN and looks like a
+     DNS problem.
+   - Command: `sudo bash deploy/caddy-install.sh --check`, then `sudo bash deploy/caddy-install.sh`.
+   - Observable: Caddy is active and `ss` shows 443 bound only to the Tailscale address(es), with
+     the certificate and key issued; a 502 here means the nginx shim prerequisite was not met.
+5. **Vault API endpoint**
+   - Prerequisite: Node **22** is installed and selected, not RHEL 9's default `nodejs:16` stream;
+     nodejs:16 fails with a syntax error pointing at valid code, which looks like corrupt source.
+   - Command: `sudo dnf module switch-to -y nodejs:22`, then `sudo bash deploy/vault-api-install.sh --check`,
+     then `sudo bash deploy/vault-api-install.sh`.
+   - Observable: `vault-api` is active as `vaultsvc` on `127.0.0.1:8099` and the tailnet
+     `/healthz` returns `{"ok":true,"checks":{"database":{"ok":true,"field_definitions":32}}}`;
+     npm's `/home/vaultsvc/.npm/_logs` message means its required `HOME` and cache were not set.
+6. **Nightly local dumps**
+   - Prerequisite: the backup job runs as a user that can connect to `fedbench` and write its own
+     `/srv/fedbench/backups` directory; this is local disk, not an off-host copy.
+   - Command: `bash deploy/backup-fedbench.sh` (there is no `--check`; `--dry-run` only previews
+     the output path and retention).
+   - Observable: one dated `.dump` and one `.sql.gz` are published, both validated, and the summary
+     reports their paths; this does not satisfy the cutover gate because the files share the database host.
+
 ## Vault data plane root install
 
 `deploy/root-install.sh` stands up the vault data plane on `edaserver`. Run its assertion pass

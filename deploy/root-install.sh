@@ -33,7 +33,21 @@ set -uo pipefail
 
 REPO=/srv/fedbackup/ferrodiode-pcb-testbench
 SECRETS=$REPO/server/config/secrets.env
-VENV=$REPO/server/.venv/bin/python
+# THE SERVICE'S OWN VIRTUALENV, not the bench's.
+#
+# fed-storage originally pointed at $REPO/server/.venv, and that fails twice over. First: that
+# tree is inside fedbackup's HOME, so everything in it is labelled user_home_t, and SELinux policy
+# forbids init_t from even reading the `python` symlink -- systemd reports
+# "Failed to locate executable ...: Permission denied", which reads as a missing file. It is why
+# fed-postgrest works and this did not: /usr/local/bin/postgrest is bin_t, so exec is permitted
+# and the service transitions out of init_t. Second: that venv is uv-managed, and the unit's own
+# header warns that `uv sync` PRUNES the editable keithley-control install a running campaign
+# depends on -- so a service in the vault's data path must not share it.
+#
+# Ours, built from the system python, on /srv where nothing prunes it.
+SRCPY=/usr/bin/python3
+VENVDIR=/srv/fedbench/venv
+VENV=$VENVDIR/bin/python
 PGRST_SRC=${PGRST_SRC:-/home/agnidata/work/bin/postgrest}
 OBJROOT=/srv/fedbench/objects
 PSQL=/usr/pgsql-17/bin/psql
@@ -131,43 +145,62 @@ fi
 # fed_storage is a Starlette app served by uvicorn, and the system python 3.9.25 has neither.
 # The dependencies ARE declared -- `storage` is an optional-dependency group in server/pyproject
 # -- the venv simply was not installed with it. So this is one pip command, not a hunt.
-[ -r "$UNITSRC/pyproject.toml" ] && ok "staged pyproject.toml (the storage extra is read from it)"   || bad "no pyproject.toml at $UNITSRC -- step 2b reads the storage requirements from it"
+# THE REQUIREMENTS, read out of pyproject rather than retyped here, so there is exactly one
+# declaration of these versions and this cannot drift from it.
+#
+# Parsed with awk, not tomllib: tomllib is stdlib only from 3.11 and the system python here is
+# 3.9. An exact string compare on the table header rather than a regex -- a dynamic regex needs
+# `[` escaped twice through awk's string layer, and getting that wrong is a fatal parse error, not
+# a wrong answer.
+extra_reqs() {
+  awk -v want="$2" '
+    !inb && $0 == want " = [" { inb=1; next }
+    inb && $0 == "]" { exit }
+    inb { if ($0 ~ /^[[:space:]]*#/) next
+          if (match($0, /"[^"]+"/)) print substr($0, RSTART+1, RLENGTH-2) }
+  ' "$1"
+}
+
+if [ -r "$UNITSRC/pyproject.toml" ]; then
+  REQS=$(extra_reqs "$UNITSRC/pyproject.toml" storage | tr '\n' ' ')
+  [ -n "$REQS" ] && ok "storage extra reads as: $REQS" \
+    || bad "could not read the storage extra from $UNITSRC/pyproject.toml"
+else
+  bad "no pyproject.toml at $UNITSRC -- the storage requirements are read from it"
+fi
+
+# The interpreter the service venv is BUILT from. It must be a system path: a venv is a thin shell
+# around this binary, and if this one lives in a home directory the SELinux problem above comes
+# straight back through the symlink.
+if [ -x "$SRCPY" ]; then
+  ok "system python for the venv: $SRCPY ($("$SRCPY" -V 2>&1))"
+  # fed_storage is self-contained -- it imports psycopg, starlette and uvicorn plus stdlib, and
+  # every module carries `from __future__ import annotations`, so its modern annotations are never
+  # evaluated. Verified to parse under the 3.9 grammar. All three packages support 3.9.
+  "$SRCPY" -c 'import venv, ensurepip' 2>/dev/null && ok "  it can build a venv with pip" \
+    || bad "  $SRCPY lacks venv/ensurepip -- install python3-libs"
+else
+  bad "no system python at $SRCPY"
+fi
 
 if [ -x "$VENV" ]; then
-  # Reported rather than asserted: what matters is that THIS interpreter can import the three
-  # modules, which is checked directly below. The version is here because when pip refuses a
-  # requirement the message is about the requirement, not about the interpreter that is too old.
-  ok "venv python is $("$VENV" -V 2>&1)"
   missing=""
   for m in starlette uvicorn psycopg; do
     "$VENV" -c "import $m" 2>/dev/null || missing="$missing $m"
   done
   if [ -z "$missing" ]; then
-    ok "venv python has starlette, uvicorn and psycopg"
+    ok "service venv has starlette, uvicorn and psycopg"
     INSTALL_EXTRA=0
   else
     # psycopg alone is not fatal -- fed_storage serves objects without it and reports zero usage
     # -- but the vault's `files` rows reference bench_storage.objects, so zero metadata is wrong
     # here in a way it is not on the bench.
-    warn "venv is missing:$missing — will install the 'storage' extra"
+    warn "service venv is missing:$missing — will install them"
     INSTALL_EXTRA=1
   fi
-
-  # DO THE EXTRACTION NOW, not in step 2b. tomllib is stdlib only from 3.11, and a venv older than
-  # that would fail here at install time -- after the JWT secret had been minted and the
-  # authenticator password set. An assertion that merely confirms the file is readable proves
-  # nothing about whether it can be read USEFULLY, so this runs the real parse and keeps the result.
-  if [ "$INSTALL_EXTRA" = 1 ]; then
-    REQS=$("$VENV" - "$UNITSRC/pyproject.toml" 2>/dev/null <<'PYEOF'
-import sys, tomllib
-with open(sys.argv[1], "rb") as f:
-    print(" ".join(tomllib.load(f)["project"]["optional-dependencies"]["storage"]))
-PYEOF
-)
-    [ -n "$REQS" ] && ok "storage extra reads as: $REQS"       || bad "could not read the storage extra from $UNITSRC/pyproject.toml (tomllib needs python 3.11+)"
-  fi
 else
-  bad "no venv at $VENV, and the system python 3.9 lacks starlette/uvicorn"
+  warn "no service venv at $VENVDIR yet — it will be created"
+  INSTALL_EXTRA=1
 fi
 
 # THE FILES THIS SCRIPT IS ABOUT TO COPY, read rather than assumed. The first version asserted
@@ -274,7 +307,39 @@ install -d -m 0750 -o fedbackup -g fedbackup /srv/fedbench "$OBJROOT" && ok "cre
 restorecon -R /srv/fedbench 2>/dev/null || true
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
-step "2b. The fed_storage dependencies"
+step "2b. The service's own virtualenv"
+# ══════════════════════════════════════════════════════════════════════════════════════════
+if [ "${INSTALL_EXTRA:-0}" = 1 ]; then
+  if [ ! -x "$VENV" ]; then
+    # As fedbackup: the service runs as fedbackup and must be able to update its own environment.
+    # A venv built by root leaves root-owned files the service user cannot touch afterwards.
+    install -d -m 0755 -o fedbackup -g fedbackup "$VENVDIR"
+    sudo -u fedbackup "$SRCPY" -m venv "$VENVDIR" \
+      && ok "created $VENVDIR from $SRCPY" \
+      || bad "could not create the venv"
+  else
+    ok "venv already at $VENVDIR"
+  fi
+
+  if [ -x "$VENV" ]; then
+    # A venv from the SYSTEM python has pip, because ensurepip ships with it. The bench's venv did
+    # not -- uv builds environments deliberately without pip, which is why `python -m pip` there
+    # failed with "No module named pip" and ensurepip could not repair it either.
+    #
+    # An ARRAY, not an unquoted $REQS: pathname expansion applies to the result of an expansion,
+    # and `psycopg[binary]>=3.1` is a valid glob -- `[binary]` is a character class.
+    IFS=' ' read -ra REQ_ARR <<<"$REQS"
+    sudo -u fedbackup "$VENV" -m pip install --quiet --upgrade "${REQ_ARR[@]}" \
+      && ok "installed ${#REQ_ARR[@]} requirements as fedbackup" \
+      || bad "pip install failed -- see above"
+    for m in starlette uvicorn psycopg; do
+      "$VENV" -c "import $m" 2>/dev/null && ok "  import $m" || bad "  $m still missing"
+    done
+  fi
+else
+  ok "service venv already has what fed_storage needs"
+fi
+
 # ══════════════════════════════════════════════════════════════════════════════════════════
 if [ "${INSTALL_EXTRA:-0}" = 1 ]; then
   # THE THREE REQUIREMENTS, NOT THE PROJECT.
@@ -443,25 +508,47 @@ step "5b. The env file's SELinux label — systemd cannot read a user's home"
 # etc_t, because that is what /etc/sysconfig/* carries and systemd reads those as EnvironmentFile
 # every day. Scoped to server/config alone: not the home, not the checkout. fedbackup keeps full
 # access -- an unconfined user domain reads etc_t without trouble.
-CFGDIR="$REPO/server/config"
-if [ -d "$CFGDIR" ]; then
-  # -m if a rule is already there, -a if not. `-a` on an existing entry is an error, and the
-  # script has to stay re-runnable.
-  if semanage fcontext -l 2>/dev/null | grep -q "^$CFGDIR(/\.\*)\?"; then
-    semanage fcontext -m -t etc_t "$CFGDIR(/.*)?" 2>/dev/null && ok "updated the fcontext rule for $CFGDIR"
+# THREE PATHS NEED A LABEL, for three different reasons:
+#
+#   server/config  -> etc_t   systemd reads secrets.env as EnvironmentFile from PID 1.
+#   venv/bin       -> bin_t   systemd must EXEC the interpreter. Exec is the strictest of the
+#                             three: init_t may execute bin_t and essentially nothing else, and
+#                             the transition out of init_t that the running service depends on
+#                             happens BECAUSE the binary is bin_t. /usr/local/bin/postgrest got
+#                             this for free from restorecon, which is the whole reason
+#                             fed-postgrest started and fed-storage did not.
+#   server/src     -> usr_t   the service imports fed_storage from there at runtime, and it is
+#                             inside fedbackup's home like everything else.
+#
+# Each is scoped to one directory. Not the home, not the checkout.
+relabel() { # $1=dir  $2=type
+  [ -d "$1" ] || return 0
+  if semanage fcontext -l 2>/dev/null | grep -q "^$1(/\.\*)\?"; then
+    semanage fcontext -m -t "$2" "$1(/.*)?" 2>/dev/null && ok "fcontext rule updated: $1 -> $2"
   else
-    semanage fcontext -a -t etc_t "$CFGDIR(/.*)?" 2>/dev/null && ok "added an fcontext rule: $CFGDIR -> etc_t" \
-      || warn "could not add the fcontext rule -- install policycoreutils-python-utils"
+    semanage fcontext -a -t "$2" "$1(/.*)?" 2>/dev/null && ok "fcontext rule added: $1 -> $2" \
+      || warn "could not add an fcontext rule for $1 -- install policycoreutils-python-utils"
   fi
-  # The rule alone changes nothing already on disk; restorecon is what applies it. Without this
-  # the unit keeps failing and the rule looks like it did not work.
-  restorecon -Rv "$CFGDIR" 2>/dev/null | sed 's/^/      /'
-  newctx=$(ls -Zd "$SECRETS" 2>/dev/null | awk '{print $1}')
-  case "$newctx" in
-    *:etc_t:*) ok "secrets.env is now $newctx" ;;
-    *)         bad "secrets.env is still $newctx -- systemd will not be able to read it" ;;
-  esac
-fi
+  # The rule alone changes nothing on disk. restorecon is what applies it, and without this the
+  # rule looks like a fix and is not.
+  restorecon -R "$1" 2>/dev/null
+}
+relabel "$VENVDIR/bin" bin_t
+relabel "$REPO/server/src" usr_t
+
+CFGDIR="$REPO/server/config"
+relabel "$CFGDIR" etc_t
+newctx=$(ls -Zd "$SECRETS" 2>/dev/null | awk '{print $1}')
+case "$newctx" in
+  *:etc_t:*) ok "secrets.env is $newctx" ;;
+  *)         bad "secrets.env is $newctx -- systemd will not be able to read it" ;;
+esac
+venvctx=$(ls -Zd "$VENV" 2>/dev/null | awk '{print $1}')
+case "$venvctx" in
+  *:bin_t:*) ok "the venv interpreter is $venvctx" ;;
+  "")        : ;;
+  *)         bad "the venv interpreter is $venvctx -- systemd cannot exec it" ;;
+esac
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 step "6. Start them"

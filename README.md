@@ -130,14 +130,19 @@ for the Clarius corpus; a figure builder; cohorts; a device dimension with cross
 changes; and a schema-grounded search agent. `docs/UNIFIED_ENDPOINT.md` marks each claim as
 **verified** or as design intent.
 
-Open, and needing a decision rather than more code:
+The three open decisions were taken on 2026-09-11 and are built: the continuous cohort view fits
+on log10 of a log-scale metric and on raw values otherwise (contract v2.17), and figure export is
+a client-side SVG renderer that draws from the same resolved panels as the screen.
 
-- **One real Clarius workbook** to point `VAULT_REAL_XLSX` at. The `.xlsx` adapter has only been
-  exercised against workbooks the tests build themselves, so its sheet-selection and column rules
-  are tested against a *model* of the export format rather than the format.
-- **The correlation fit** for the continuous cohort view — OLS on raw values, on log10 of a
-  log-scale metric, or weighted by n. A different right answer per metric, so it is unspecified
-  rather than guessed.
-- **Vector export** for figures: server-side matplotlib or a client-side SVG renderer.
+Known limitation, stated rather than left to be inferred from a skipped test:
+
+- **The `.xlsx` adapter is not verified against the real Clarius format.** No real workbook is
+  available to check in, so its sheet-selection and column rules are tested against a *model* of
+  the export format. `tests/realfile.test.ts` is gated on `VAULT_REAL_XLSX`, points at nothing,
+  and is the "1 skipped" in every run. Treat the first production ingest of a Clarius workbook as
+  a dry run; pointing that variable at one real file retires this and nothing else does.
+
+Still open, and a determination rather than a decision: whether the 128×128 mega run is a pointer
+or an upload — settle it on a sha256 comparison against `public.captures.content_sha256`.
 
 Run the remote API check with `bash scripts/smoke.sh` after setting its environment.

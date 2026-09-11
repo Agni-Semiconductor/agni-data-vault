@@ -255,6 +255,10 @@ absent — which is the "1 skipped" in every vault test run. **Point that env va
 `20-DC-1.xlsx` and this stops being an assumption.** Until then, treat the first production
 run as a dry run and read the per-measurement log lines.
 
+**Decided 2026-09-11: no real workbook is available, so this stays as it is and is written into
+the contract (v2.17) as an explicit non-verification** rather than left to be inferred from a
+skipped test. It is the one claim in this document that a green test run does not support.
+
 ### Units are data now, and conversion refuses rather than coerces
 
 `vault.units` and `vault.column_units` (0112) replace what used to be a literal in three
@@ -612,16 +616,54 @@ than any other performance work here.
 
 - **The pin map belongs to the board, not to a run.** The crossbar and package-pad views need
   to know which S1 pin drives which WL net. That is board topology, static across every
-  campaign on a given board revision, so it goes in a `public.board_pin_map` table sourced from
-  versioned board config and keyed by `campaign_runs.board_config` — not extracted from a
-  per-run `analysis.json`, where it would be duplicated across every campaign and absent for
-  any run whose analysis was never generated. **Not built yet**; the views wait on it.
+  campaign on a given board, so it is a table rather than something extracted from a per-run
+  `analysis.json` — where it would be duplicated across every campaign and absent for any run
+  whose analysis was never generated.
+
+  **Built as `vault.board_pin_map`, keyed by `dut_id` — which differs from this decision as
+  originally written in two ways, both deliberate.** It is in `vault`, not `public`, because
+  `public` is the bench's copied wire contract and four restore tools dump `--schema=public`; a
+  table there would ride along in every bench restore while the bench repo knows nothing about
+  it. And it is keyed by `dut_id` rather than by `campaign_runs.board_config`, because keying by
+  a board revision only pays off if you know which boards share a design — and this repo does
+  not. Inventing that taxonomy would be the same class of error as deciding `D116` and
+  `D116_116` are one device. `vault.copy_pin_map()` makes the sharing explicit instead, and
+  stamps the copy `copied from <dut>`. See §5f and contract v2.16.
+
+### Decided 2026-09-11 (Owen, with coworkers)
+
+- **The one-cluster decision above is confirmed**, unchanged. `agni-connect`'s infrastructure
+  chapter still needs the matching edit; **that repo is not writable from here**, so it remains
+  an action for whoever owns that spec, not a change this repo can make.
+
+- **The correlation fit for the continuous cohort view: OLS on log10(y) for a metric declared
+  `log_scale`, on raw y otherwise.** `onoff` and the leakage metrics span decades and a raw fit
+  there is dominated by the largest few points — it reports a slope describing three devices and
+  draws it across four hundred. `metric_definitions.log_scale` already records which metrics are
+  which, so this is a lookup rather than a heuristic, and the choice travels in the response as
+  `fit_space` so a slope can never be read in the wrong space. **x stays raw**, deliberately:
+  the decision named the metric, and widening it to the x axis silently would change what a
+  published slope means. Built as `vault.cohort_correlation` (0117); see contract v2.17.
+
+- **Vector export is a client-side SVG renderer**, not server-side matplotlib. matplotlib would
+  have matched `campaign_analysis.py`'s figures and bought headless report generation; the
+  client wins on the property matplotlib could not have given — **the same resolved data draws
+  both**. `resolvePanel` has already applied the unit conversions, the transforms, the
+  decimation and the refusals, and `src/plot/exportSvg.ts` receives that result and nothing
+  else, so an exported figure cannot disagree with the screen about what was plotted or what was
+  discarded. A second renderer reading the source files again could. Cost, stated: the export is
+  a re-render rather than a screenshot, so tick *placement* can differ from the screen while the
+  axis ranges and every plotted point do not.
+
+- **No real Clarius workbook is available**, so the `.xlsx` adapter keeps its synthetic fixture
+  and is **marked unverified against the real format** in the contract rather than left to look
+  tested. `tests/realfile.test.ts` stays gated on `VAULT_REAL_XLSX` — it is the "1 skipped" in
+  every run — and points at nothing. See the "NOT yet verified" note in §5 and contract v2.17;
+  the first production ingest of a Clarius workbook should be treated as a dry run.
 
 ### Still open
 
 1. **The 128×128 mega run** — pointer or upload. Decide on a sha256 comparison against
-   `public.captures.content_sha256`, not on the storage budget.
-3. **The 128×128 mega run** — pointer or upload. Decide on a sha256 comparison against
    `public.captures.content_sha256`, not on the storage budget.
 
 Prerequisites nobody has done yet: DNS delegation for `vault.agnisemi.ai` (the domain is not on

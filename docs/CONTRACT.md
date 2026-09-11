@@ -843,3 +843,72 @@ of wrong probing.
 Keyed by `dut_id` rather than a board revision, because boards very likely share designs but
 **which** ones is not something this repo knows, and inventing that taxonomy would be the same
 class of error as deciding `D116` and `D116_116` are one device.
+
+## v2.17 The correlation fit, vector export, and one adapter that is not verified (amends v2.13)
+
+### `POST /api/cohorts/correlation`
+
+A metric against a **continuous** grouping key, with an ordinary least squares fit. A categorical
+key is a 422 naming `group_by`, refused by the API and again by `vault.cohort_correlation` — not
+cast to zero so it can be plotted.
+
+**The fit space is a lookup, not a heuristic, and it travels in the response.** `fit_space` is
+`log10_y` when `metric_definitions.log_scale` is true and `raw` otherwise. `onoff` and the leakage
+metrics span decades, and a raw fit there is dominated by the largest few points: it reports a
+slope that describes three devices and draws it across four hundred. **A `log10_y` slope is
+decades per x unit** — printing it with the metric's own unit is a 10^n error in a caption, which
+is exactly where nobody re-derives it. **x is always fitted raw**, deliberately and as a stated
+limitation.
+
+**The regression sums travel with the coefficients** (`sxx`, `syy`, `sxy`, `avg_x`, `n`). The
+scatter is capped at 2,000 points; the fit never is. A client draws the full fit's confidence band
+from a partial scatter rather than refitting on what arrived, because fitting twice in two
+languages is two definitions of one number. When the scatter is thinned it is thinned **evenly
+across the x range and keeps both ends** — every k-th rank never reaches the last one unless the
+count divides exactly, and a scatter that stops short of where the line keeps going is a picture
+that disagrees with its own caption.
+
+**Two ledgers balance**, and both are checked in the UI:
+
+```
+n_members     = n_with_metric + n_no_metric_row + n_refused
+n_with_metric = n_fit + n_no_x + n_nonpositive_y
+```
+
+`n_nonpositive_y` is its own bucket because a dead device honestly reads `0` for on/off: that is
+**real data a log axis cannot show**, not a missing measurement, and calling it "no metric" is a
+false statement about the corpus. Same distinction `undrawableReason` already draws on the
+distribution chart.
+
+**No p-value is reported**, and the chart says so. A cohort is whatever matched a predicate — a
+convenience sample, not a random one — so a significance test over it claims more than the data
+supports. `n`, R² and the slope's standard error are returned instead.
+
+### Vector export is client-side
+
+`src/plot/exportSvg.ts` renders a figure from the **already-resolved panels**, the same array the
+screen is drawing. It is not a second pass over the source files: `resolvePanel` has applied the
+unit conversions, transforms, decimation and refusals, so an exported figure cannot disagree with
+the screen about what was plotted or what was discarded.
+
+It is **not a screenshot**. Ticks are generated rather than copied off the canvas, so tick
+placement may differ from the screen; the axis ranges and every plotted point do not.
+
+Four invariants the export must not lose, each with a mutation test: a null **breaks** the path
+(`spanGaps: false` on screen and here — a null is a point a transform refused, and bridging it
+draws a line where nothing was measured); a log axis is mapped through `log10` (drawn linearly,
+10 between 1 and 100 sits at 9% of the height and the curve still looks like a curve); decimation,
+unit-conversion and refusal notes are written into the figure's **footer**, because a reader of an
+SVG has no badge to hover; and a layout too small for its panels **grows** rather than dropping
+them. The file carries a physical size in millimetres as well as a `viewBox`.
+
+### The `.xlsx` adapter is NOT verified against the real Clarius format
+
+Stated here rather than left to be inferred from a skipped test. No real Clarius `.xls`/`.xlsx` is
+available to check in, so the sheet-selection and column-name rules are tested **against a model
+of the export format, not against the format**. `tests/realfile.test.ts` is gated on
+`VAULT_REAL_XLSX`, points at nothing, and is the "1 skipped" in every test run.
+
+**Consequence for anyone deploying this:** treat the first production ingest of a Clarius workbook
+as a dry run and read the per-measurement log lines. Pointing `VAULT_REAL_XLSX` at one real
+workbook retires this in full and nothing else does.

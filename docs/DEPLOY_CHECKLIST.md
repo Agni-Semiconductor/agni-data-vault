@@ -261,20 +261,19 @@ it as `EnvironmentFile` and the deploy account never needs to see it. **Nothing 
 `VITE_` variable**: that is a greppable CI invariant rather than a convention, because anything
 `VITE_`-prefixed is inlined into the browser bundle at build time.
 
-| var | where it comes from | notes |
+| var | live value or source | what breaks without it, and the misleading symptom |
 |---|---|---|
-| `VAULT_REST_URL` | `http://127.0.0.1:8087` | the nginx shim, kept verbatim; see §5 |
-| `VAULT_STORAGE_URL` | `http://127.0.0.1:8087` | same origin — `fed_storage` behind the same shim |
-| `VAULT_SERVICE_JWT` | `tools/mint_service_jwt.py --role vault_service` | **must** name `vault_service`; a weaker role returns `[]` from every table and the vault looks empty rather than unauthorised |
-| `VAULT_API_KEY` | `python -c "import secrets;print(secrets.token_urlsafe(32))"` | the break-glass machine path — the CLI and the bench keep working with Google down. This is why there is no second password anywhere. |
-| `VAULT_ACCESS_TEAM_URL` | Cloudflare Zero Trust → Settings → Custom Pages | `https://<team>.cloudflareaccess.com`; the JWKS is fetched from it |
-| `VAULT_ACCESS_AUD` | the Access application's Audience tag | checked on every assertion |
-| `VAULT_EMAIL_DOMAIN` | `agnisemi.ai` | checked against the **`hd` claim** as well as the suffix — `hd` is asserted by Google about the account's domain and cannot be satisfied by a personal account with a lookalike address |
-| `VAULT_READONLY` | `1` for the shakedown deploy, empty after | rejects POST/PATCH/DELETE before the router is reached, so no resource can opt itself out |
-| `ANTHROPIC_API_KEY` | console.anthropic.com | **optional.** Without it `/api/search/ask` returns 503 `agent_unavailable` and everything else works — an unconfigured optional feature is a deployment state, not a fault. |
-| `PORT` | `8099` | loopback only. **Not 3001**, which the object store owns on this host. |
+| `VAULT_REST_URL` | `http://127.0.0.1:8087/rest/v1` | PostgREST metadata and row reads use the wrong route; this looks like missing tables or a broken database. |
+| `VAULT_STORAGE_URL` | `http://127.0.0.1:8087/storage/v1` | Object uploads and downloads use the wrong route; this looks like missing or corrupt files. |
+| `VAULT_SERVICE_JWT` | Existing HS256 token with `role=vault_service`, signed with the shared secret in `secrets.env` | PostgREST and object-store authorization fails. Never regenerate the shared secret: metadata can still work while downloads return 401, which looks like a corrupt archive. |
+| `VAULT_API_KEY` | One shared static key for machine clients and break-glass access | Machine authentication returns 500/401; this looks like an API outage rather than a missing server credential. |
+| `VAULT_ACCESS_TEAM_URL` | `https://<team>.cloudflareaccess.com` | The API cannot fetch Access signing keys; browser requests return 401, which looks like a failed Google login. |
+| `VAULT_ACCESS_AUD` | The Access application's Audience tag | Every Access assertion is rejected; browser requests return 401, which looks like an account or Workspace problem. |
+| `VAULT_EMAIL_DOMAIN` | `agnisemi.ai` | Human identity is rejected unless the email suffix and Google's `hd` claim match; this looks like an Access policy rejection. |
+| `ANTHROPIC_API_KEY` | Server-side key from the Anthropic console | `/api/search/ask` returns 503 `agent_unavailable`; the rest of the API works, which looks like a search-route failure rather than a server outage. The key must never reach a browser. |
+| `PORT` | `8099` | The API is not reachable at the configured proxy route; using `3001` collides with the object store and looks like a proxy or storage failure. |
 
-actually reads are the ones in the table above, and `.env.example` is the copy to trust.
+These are the variables `server/vault-api.mjs` and `api/_lib/*` read. `.env.example` is the copy to trust.
 
 **`PGRST_JWT_SECRET` is in no dump.** It is minted once and lives only in
 `<checkout>/server/config/secrets.env`, mode `0600`, owned by `fedbackup`; losing it bricks the

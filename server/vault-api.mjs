@@ -88,5 +88,26 @@ async function serve(req, res) {
   }
 }
 
+// FAIL BEFORE LISTENING, not on the first request.
+//
+// These are read lazily inside supabaseAdmin(), which throws when something first tries to use it.
+// Without this check the process starts cleanly, systemd reports `active`, a port monitor sees a
+// listener, and every request returns 500 with a message about the environment -- so the service
+// looks up and behaves broken, which is the hardest combination to diagnose and the one a health
+// check is least likely to distinguish from a database problem.
+//
+// Exit 1 rather than throwing: systemd then shows the unit as failed with the reason in the
+// journal, which is what an operator looks at, instead of a running unit and a confusing log line.
+const REQUIRED = ['VAULT_REST_URL', 'VAULT_SERVICE_JWT'];
+const missing = REQUIRED.filter((name) => !process.env[name]);
+if (missing.length > 0) {
+  console.error(
+    `Agni Vault API refusing to start: ${missing.join(', ')} not set. ` +
+      'These are read from EnvironmentFile=/etc/vault/vault-api.env by the systemd unit; ' +
+      'a service that starts without them answers every request with a 500 while appearing healthy.',
+  );
+  process.exit(1);
+}
+
 const server = http.createServer((req, res) => { void serve(req, res); });
 server.listen(port, host, () => console.log(`Agni Vault API listening on http://${host}:${port}`));

@@ -654,9 +654,23 @@ The sure-only rule, applied to identity:
 
 | | resolves how | automatic? |
 |---|---|---|
-| `bench_grid` | `(dut_id, grid_row, grid_col)` → sample via `dut_sample_map`, address `D{row}_{col}` | **Yes** — exact, no inference |
+| `bench_grid` | `(dut_id, grid_row, grid_col)` → sample via `dut_sample_map`, address `D{row}_{col}`, **and the originating `bench_dut_id` is recorded on the device** | **Yes** — exact, no inference |
 | `vault_label` | the literal `device_address` on its sample | Yes, literal only |
 | across schemes | **only** a row in `vault.device_aliases`, carrying `confirmed_by` | **Never automatic** |
+
+**One sample can have several boards, and their cells are different devices.** `dut_sample_map`
+has `dut_id` as its primary key with no unique on `sample_id`, so multiple dice from one wafer map
+to one sample — and board-A's cell (116,116) and board-B's cell (116,116) are two physical
+devices that both want the address `D116_116`. A device therefore records which board it came
+from, uniqueness is per `(sample, board, row, col)` rather than per `(sample, address)`, and
+`vault.device_history` joins the device's **own** `bench_dut_id` rather than going back through
+the map. Verified before the column existed: registering both boards produced **one** device
+whose history held two events from two boards.
+
+Consequently `vault.resolve_device(sample_id, address)` **raises on ambiguity** rather than
+returning one of the matches. Picking one would attach a measurement to whichever row the planner
+returned first — a coin flip nothing downstream can detect. A client that hits this error must
+identify the device by id.
 
 `device_aliases.confirmed_by` is NOT NULL with no default, and the table has **no UPDATE grant**
 (enforced by an explicit `REVOKE` — see below). An alias is a signed statement: editing one in

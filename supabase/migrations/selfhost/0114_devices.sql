@@ -46,20 +46,41 @@ create table if not exists vault.devices (
   -- fabrication the header refuses.
   grid_row       integer,
   grid_col       integer,
+  -- WHICH BOARD. dut_sample_map has dut_id as its primary key and NO unique on sample_id, so
+  -- several boards legitimately map to one sample -- multiple dice from one wafer. Without this
+  -- column, board-A's cell (116,116) and board-B's cell (116,116) are one row and their
+  -- histories merge: two different physical devices, one timeline. Verified before this column
+  -- existed: registering both boards produced ONE device whose history held two events from two
+  -- boards, which is exactly the fabrication this file's header refuses to perform.
+  bench_dut_id   text,
   notes          text,
   created_by     text,
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now(),
   updated_by     text,
 
-  constraint devices_sample_address_uniq unique (sample_id, device_address),
+  -- NO table-level unique on (sample_id, device_address): two boards on one sample BOTH have a
+  -- D116_116, and they are different devices. Uniqueness is per scheme, below.
+  --
   -- A bench cell without its coordinates is not a bench cell; it is a vault label wearing the
   -- wrong scheme, and it would silently drop out of every grid query.
   constraint devices_bench_has_grid check (
-    address_scheme <> 'bench_grid' or (grid_row is not null and grid_col is not null)),
+    address_scheme <> 'bench_grid' or (grid_row is not null and grid_col is not null and bench_dut_id is not null)),
   constraint devices_vault_has_no_grid check (
-    address_scheme <> 'vault_label' or (grid_row is null and grid_col is null))
+    address_scheme <> 'vault_label' or (grid_row is null and grid_col is null and bench_dut_id is null))
 );
+
+-- Two PARTIAL indexes, not one constraint. A plain unique over
+-- (sample_id, device_address, bench_dut_id) would enforce NOTHING for vault labels, because
+-- bench_dut_id is null there and Postgres treats nulls as DISTINCT in a unique constraint --
+-- the identical trap 0111 documents for measurement_metrics and selfhost_schema.sql documents
+-- for device_tests.measurement.
+create unique index if not exists devices_bench_cell_uniq
+  on vault.devices (sample_id, bench_dut_id, grid_row, grid_col)
+  where address_scheme = 'bench_grid';
+create unique index if not exists devices_vault_label_uniq
+  on vault.devices (sample_id, device_address)
+  where address_scheme = 'vault_label';
 
 create index if not exists devices_sample_idx on vault.devices (sample_id);
 create index if not exists devices_grid_idx on vault.devices (sample_id, grid_row, grid_col)
@@ -109,15 +130,30 @@ comment on column vault.measurements.device_id is
 -- NOT create devices: a device row is a claim that a physical thing exists, and a typo'd address
 -- would mint one silently. Registration is explicit.
 create or replace function vault.resolve_device(p_sample_id uuid, p_address text)
-returns uuid language sql stable as $fn$
-  select d.id from vault.devices d
-   where d.sample_id = p_sample_id and d.device_address = p_address
-   union all
-  select a.device_id from vault.device_aliases a
-    join vault.devices d on d.id = a.device_id
-   where d.sample_id = p_sample_id and a.alias_address = p_address
-   limit 1
-$fn$;
+returns uuid language plpgsql stable as $fn$
+declare hits uuid[];
+begin
+  select array_agg(id) into hits from (
+    select d.id from vault.devices d
+     where d.sample_id = p_sample_id and d.device_address = p_address
+     union
+    select a.device_id from vault.device_aliases a
+      join vault.devices d on d.id = a.device_id
+     where d.sample_id = p_sample_id and a.alias_address = p_address
+  ) matched;
+
+  if hits is null then return null; end if;
+  -- AMBIGUITY RAISES rather than picking one. Two boards on one sample both carry a D116_116,
+  -- and they are different devices -- `limit 1` would attach a measurement to whichever the
+  -- planner happened to return first, which is a coin flip that nothing downstream can detect.
+  -- A raised error makes the caller name the board; a silent choice makes the caller confident.
+  if cardinality(hits) > 1 then
+    raise exception 'device address % is ambiguous on this sample (% devices match)', p_address, cardinality(hits)
+      using errcode = '22023',
+            hint = 'several boards map to this sample and share this address; identify the device by id';
+  end if;
+  return hits[1];
+end $fn$;
 
 -- ---------------------------------------------------------------------------
 -- 4. Registering bench cells, which is the half that CAN be automatic
@@ -145,10 +181,13 @@ begin
       from public.device_tests
      where dut_id = p_dut_id and grid_row is not null and grid_col is not null
   ), inserted as (
-    insert into vault.devices (sample_id, device_address, address_scheme, grid_row, grid_col, created_by)
-    select mapped, 'D' || c.grid_row || '_' || c.grid_col, 'bench_grid', c.grid_row, c.grid_col, p_actor
+    insert into vault.devices (sample_id, device_address, address_scheme, grid_row, grid_col, bench_dut_id, created_by)
+    select mapped, 'D' || c.grid_row || '_' || c.grid_col, 'bench_grid', c.grid_row, c.grid_col, p_dut_id, p_actor
       from cells c
-    on conflict (sample_id, device_address) do nothing
+    -- Inferred from the index's COLUMNS AND PREDICATE. `on conflict on constraint <name>` does
+    -- not work here: devices_bench_cell_uniq is a partial unique INDEX, not a constraint, and
+    -- Postgres refuses to look it up by name.
+    on conflict (sample_id, bench_dut_id, grid_row, grid_col) where address_scheme = 'bench_grid' do nothing
     returning 1
   )
   select count(*) into created from inserted;
@@ -184,10 +223,11 @@ select d.id, d.sample_id, d.device_address,
        t.dut_id,
        t.run_id
   from vault.devices d
-  join vault.dut_sample_map map on true
-  join vault.samples s on s.sample_id = map.sample_id and s.id = d.sample_id
+  -- Joined on the device's OWN bench_dut_id, not through dut_sample_map. Going via the map
+  -- reaches every board mapped to this sample, so a sample with two boards merged their cells at
+  -- the same coordinates into one timeline.
   join public.device_tests t
-    on t.dut_id = map.dut_id and t.grid_row = d.grid_row and t.grid_col = d.grid_col
+    on t.dut_id = d.bench_dut_id and t.grid_row = d.grid_row and t.grid_col = d.grid_col
  where d.address_scheme = 'bench_grid';
 
 alter view vault.device_history set (security_invoker = on);

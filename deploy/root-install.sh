@@ -22,6 +22,8 @@
 #   /etc/systemd/system/fed-storage.service
 #   /etc/nginx/conf.d/nginx-fedbench.conf
 #   SELinux: one boolean, one port label
+#   the fedbackup venv (pip install of the already-declared `storage` extra, as fedbackup)
+#   secrets.env (appends the JWT secret and PGRST_DB_URI if absent; never rewrites an existing one)
 #
 # It does not read, list or modify anything under /home, /storage/home or /home/shared. This box
 # is somebody's EDA machine first.
@@ -60,9 +62,10 @@ n=$(sudo -u postgres "$PSQL" -tAX -d fedbench -c "select count(*) from migration
 [ -d "$REPO" ] && ok "repo checkout at $REPO" || bad "no repo checkout at $REPO — the units' WorkingDirectory does not exist"
 
 # THE SECRET IS SHARED AND MUST NOT BE REGENERATED. PostgREST verifies tokens with it and
-# fed_storage verifies the SAME tokens with it; mint a fresh one here and metadata reads keep
-# working while every object download 401s, which reads as a corrupt archive rather than a
-# mismatched key. This script reads the existing value and never writes one.
+# fed_storage verifies the SAME tokens with it; replace it once tokens are out and metadata reads
+# keep working while every object download 401s -- which reads as a corrupt archive rather than a
+# mismatched key. An EXISTING value is therefore never touched. An ABSENT one is minted, because
+# on a box that has never issued a token there is nothing to break.
 if [ -r "$SECRETS" ]; then
   ok "secrets.env readable"
   if grep -qE '^(FED_)?PGRST_JWT_SECRET=' "$SECRETS"; then
@@ -71,8 +74,19 @@ if [ -r "$SECRETS" ]; then
     # PostgREST refuses to start below 32 characters. That is the one misconfiguration in this
     # stack that fails loudly, so it is worth catching here rather than in a restart loop.
     [ "$len" -gt 32 ] && ok "secret is longer than 32 characters" || bad "secret is $((len-1)) characters — PostgREST requires 32 and will refuse to start"
+    MINT_SECRET=0
   else
-    bad "no PGRST_JWT_SECRET in $SECRETS — do NOT invent one, find the value the bench clients already use"
+    # ABSENT IS FINE ON A GREENFIELD BOX, and the first version of this check got that wrong.
+    # The rule is not "never create a secret" -- it is "never create a SECOND one". Nothing here
+    # has ever served a token: PostgREST and fed_storage are not installed and the bench still
+    # talks to hosted Supabase. So one is minted below and written once.
+    #
+    # After that it is fixed forever. PostgREST verifies with it, fed_storage verifies the SAME
+    # tokens with it, and every token handed to the Pi or to agni-connect is signed with it.
+    # Regenerating gives you working metadata reads and 401 on every object download, which reads
+    # as a corrupt archive rather than a mismatched key.
+    warn "no JWT secret yet — one will be minted (nothing has been issued from this box, so this is the safe moment)"
+    MINT_SECRET=1
   fi
   grep -qE '^PGRST_DB_URI=' "$SECRETS" && ok "PGRST_DB_URI defined" \
     || warn "no PGRST_DB_URI in secrets.env — add postgres://authenticator:<pw>@127.0.0.1:5432/fedbench (see step 3)"
@@ -80,12 +94,24 @@ else
   bad "cannot read $SECRETS"
 fi
 
-# fed_storage is a Starlette app. The system python is 3.9.25 and does NOT have starlette or
-# uvicorn (verified 2026-09-11), so `/usr/bin/python3 -m fed_storage` fails on import. The unit
-# must point at the venv.
+# fed_storage is a Starlette app served by uvicorn, and the system python 3.9.25 has neither.
+# The dependencies ARE declared -- `storage` is an optional-dependency group in server/pyproject
+# -- the venv simply was not installed with it. So this is one pip command, not a hunt.
 if [ -x "$VENV" ]; then
-  if "$VENV" -c 'import starlette' 2>/dev/null; then ok "venv python has starlette"
-  else bad "venv exists but has no starlette — pip install starlette uvicorn inside it"; fi
+  missing=""
+  for m in starlette uvicorn psycopg; do
+    "$VENV" -c "import $m" 2>/dev/null || missing="$missing $m"
+  done
+  if [ -z "$missing" ]; then
+    ok "venv python has starlette, uvicorn and psycopg"
+    INSTALL_EXTRA=0
+  else
+    # psycopg alone is not fatal -- fed_storage serves objects without it and reports zero usage
+    # -- but the vault's `files` rows reference bench_storage.objects, so zero metadata is wrong
+    # here in a way it is not on the bench.
+    warn "venv is missing:$missing — will install the 'storage' extra"
+    INSTALL_EXTRA=1
+  fi
 else
   bad "no venv at $VENV, and the system python 3.9 lacks starlette/uvicorn"
 fi
@@ -120,11 +146,48 @@ install -d -m 0750 -o fedbackup -g fedbackup /srv/fedbench "$OBJROOT" && ok "cre
 restorecon -R /srv/fedbench 2>/dev/null || true
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
-step "3. The authenticator role"
+step "2b. The fed_storage dependencies"
+# ══════════════════════════════════════════════════════════════════════════════════════════
+if [ "${INSTALL_EXTRA:-0}" = 1 ]; then
+  # As fedbackup, into fedbackup's venv. Running pip as root into somebody else's virtualenv
+  # leaves root-owned files in it that the service user then cannot update.
+  sudo -u fedbackup "$VENV" -m pip install --quiet --upgrade "$REPO/server[storage]"     && ok "installed the storage extra into the venv"     || bad "pip install failed — see above"
+  for m in starlette uvicorn psycopg; do
+    "$VENV" -c "import $m" 2>/dev/null && ok "  import $m" || bad "  $m still missing"
+  done
+else
+  ok "venv already has what fed_storage needs"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+step "3. The shared JWT secret, and the authenticator role"
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # PostgREST connects as `authenticator` and SET ROLEs to whatever a token names. The role exists
 # but is NOLOGIN until it has a password. This does NOT print or store the password anywhere
 # except secrets.env, which is already the file holding the JWT secret.
+if [ "${MINT_SECRET:-0}" = 1 ]; then
+  SECRET=$(head -c 48 /dev/urandom | base64 | tr -d '/+=' | head -c 48)
+  umask 077
+  {
+    printf '
+# The data plane JWT secret. PostgREST verifies tokens with it and fed_storage
+'
+    printf '# verifies the SAME tokens with it. Minted %s on a box that had never issued one.
+' "$(date -I)"
+    printf '# NEVER REGENERATE: metadata reads keep working and every object download 401s,
+'
+    printf '# which reads as a corrupt archive rather than a mismatched key.
+'
+    printf 'PGRST_JWT_SECRET=%s
+' "$SECRET"
+    printf 'FED_PGRST_JWT_SECRET=%s
+' "$SECRET"
+  } >> "$SECRETS"
+  chown fedbackup:fedbackup "$SECRETS"; chmod 0600 "$SECRETS"
+  ok "minted the shared JWT secret and wrote it to secrets.env (value not printed)"
+  unset SECRET
+fi
+
 if grep -qE '^PGRST_DB_URI=' "$SECRETS"; then
   ok "PGRST_DB_URI already present — leaving the authenticator password alone"
 else

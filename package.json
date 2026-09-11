@@ -13,6 +13,7 @@
     "check:api": "node --check api/handler.js && node --input-type=module -e \"await import('./api/handler.js')\""
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
     "@supabase/supabase-js": "^2.98.0",
     "@tanstack/react-query": "^5.90.0",
     "@tanstack/react-table": "^8.21.0",

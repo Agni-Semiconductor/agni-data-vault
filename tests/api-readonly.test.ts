@@ -51,6 +51,19 @@ describe('VAULT_READONLY=1', () => {
     expect(state.routed).toEqual([{ method: 'POST', segments: ['cohorts', 'summary'] }])
   })
 
+  it('allows POST /api/search/ask, which computes a filter and writes only its audit row', async () => {
+    const res = await call('POST', 'search/ask')
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('but POST /api/search/<id>/accepted is REFUSED — it updates a row', async () => {
+    // The exactness of the allow-list is what makes it safe. `accepted` is a write, and it sits
+    // one path segment away from one that is allowed.
+    const res = await call('POST', 'search/3f2b8c6e-1a4d-4b5e-9c7f-2a6d8e0f1b2c/accepted')
+    expect(res.statusCode).toBe(503)
+    expect(state.routed).toEqual([])
+  })
+
   it('THE HOLE THAT MUST NOT EXIST: POST /api/cohorts is still refused', async () => {
     // A prefix match (`startsWith('cohorts')`) would admit this, and this one CREATES A ROW.
     // The allow-list is exact paths for exactly this reason.

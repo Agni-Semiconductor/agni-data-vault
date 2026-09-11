@@ -1,3 +1,12 @@
+-- WRAPPED IN A TRANSACTION, added 2026-09-11 after a real partial failure.
+-- Applying this chain to edaserver stopped at `create extension pg_trgm` (contrib was not
+-- installed). ON_ERROR_STOP aborted the file -- but without a transaction the statements BEFORE
+-- the failure had already committed, so the database was left holding two schemas from a
+-- migration the ledger correctly recorded as never applied. This file is idempotent, so that
+-- particular case recovers on a re-run; the next file's failure might not. Postgres runs DDL
+-- transactionally, so the fix costs nothing.
+begin;
+
 create schema if not exists vault;
 create schema if not exists extensions;
 create extension if not exists pg_trgm with schema extensions;
@@ -29,3 +38,5 @@ alter role vault_read bypassrls;
 -- real PG 17.10: the rest of this file is re-runnable, but this line is not standalone.
 grant vault_service, vault_read to authenticator;
 grant usage on schema vault, extensions to vault_service, vault_read;
+
+commit;

@@ -30,7 +30,14 @@
 set -euo pipefail
 
 DB=""
-PSQL_CMD="psql"
+# NOT bare `psql`. On edaserver that resolves to
+# /home/shared/eda/siemens/calibre/current/bin/psql -- Siemens Calibre ships its own client and
+# it wins on PATH. A migration chain run through whatever a layout tool bundles is not a thing
+# anyone should discover afterwards. Absolute path, and override with --psql-cmd for containers.
+PSQL_CMD="/usr/pgsql-17/bin/psql"
+# Empty means "let psql use the connecting OS user", which is what peer auth over the unix socket
+# wants. Hardcoding -U postgres breaks peer auth for every other operator.
+PG_USER=""
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/supabase/migrations/selfhost"
 DRY=0
 ALLOW_EDITED=0
@@ -39,6 +46,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --db)           DB="$2"; shift 2 ;;
     --psql-cmd)     PSQL_CMD="$2"; shift 2 ;;
+    --pg-user)      PG_USER="$2"; shift 2 ;;
     --dir)          DIR="$2"; shift 2 ;;
     --dry-run)      DRY=1; shift ;;
     # Only after you have decided the edit is safe against THIS database. It records the new
@@ -50,7 +58,9 @@ done
 [ -n "$DB" ] || { echo "--db is required" >&2; exit 2; }
 [ -d "$DIR" ] || { echo "migration directory not found: $DIR" >&2; exit 2; }
 
-psql_q() { $PSQL_CMD -v ON_ERROR_STOP=1 -tAX -U postgres -d "$DB" -c "$1"; }
+USER_ARG=()
+[ -n "$PG_USER" ] && USER_ARG=(-U "$PG_USER")
+psql_q() { $PSQL_CMD -v ON_ERROR_STOP=1 -tAX "${USER_ARG[@]}" -d "$DB" -c "$1"; }
 digest()  { sha256sum "$1" | cut -d' ' -f1; }
 
 # The ledger lives in its own schema, not in `vault` (which the chain creates, so it cannot hold
@@ -111,7 +121,7 @@ for f in "${FILES[@]}"; do
   start="$(date +%s%3N 2>/dev/null || echo 0)"
   # Capture stdout AND stderr: psql writes diagnostics to stderr, and a check that only reads
   # stdout sees a clean run for a file that failed.
-  out="$($PSQL_CMD -v ON_ERROR_STOP=1 -q -U postgres -d "$DB" -f "$f" 2>&1 || true)"
+  out="$($PSQL_CMD -v ON_ERROR_STOP=1 -q "${USER_ARG[@]}" -d "$DB" -f "$f" 2>&1 || true)"
   # Loose on purpose -- see the header. `^ERROR` matches nothing against psql's prefixed output.
   if printf '%s' "$out" | grep -qi 'error\|fatal'; then
     printf '  %-38s \033[31mFAILED\033[0m\n' "$name"

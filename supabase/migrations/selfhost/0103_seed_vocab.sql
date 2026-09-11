@@ -1,3 +1,12 @@
+-- WRAPPED IN A TRANSACTION, added 2026-09-11 after a real partial failure.
+-- Applying this chain to edaserver stopped at `create extension pg_trgm` (contrib was not
+-- installed). ON_ERROR_STOP aborted the file -- but without a transaction the statements BEFORE
+-- the failure had already committed, so the database was left holding two schemas from a
+-- migration the ledger correctly recorded as never applied. This file is idempotent, so that
+-- particular case recovers on a re-run; the next file's failure might not. Postgres runs DDL
+-- transactionally, so the fix costs nothing.
+begin;
+
 insert into vault.option_lists (key, label, description) values
   ('people', 'People', 'People associated with samples and measurements'),
   ('instruments', 'Instruments', 'Measurement instruments'),
@@ -27,3 +36,5 @@ insert into vault.option_values (list_key, value, label, sort_order) values
 on conflict (list_key, value) do nothing;
 
 insert into vault.allowlist (email, role) values ('spencer.ware@agnisemi.ai', 'admin') on conflict (email) do nothing;
+
+commit;

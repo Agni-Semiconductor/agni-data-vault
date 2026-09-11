@@ -1,3 +1,12 @@
+-- WRAPPED IN A TRANSACTION, added 2026-09-11 after a real partial failure.
+-- Applying this chain to edaserver stopped at `create extension pg_trgm` (contrib was not
+-- installed). ON_ERROR_STOP aborted the file -- but without a transaction the statements BEFORE
+-- the failure had already committed, so the database was left holding two schemas from a
+-- migration the ledger correctly recorded as never applied. This file is idempotent, so that
+-- particular case recovers on a re-run; the next file's failure might not. Postgres runs DDL
+-- transactionally, so the fix costs nothing.
+begin;
+
 insert into vault.field_definitions (entity,key,label,help,type,options_list_key,unit,required,sort_order,group_name,column_name,show_in_table,min,max) values
   ('sample','sample_id','Sample ID','Unique human-readable sample identifier.','text',null,null,true,10,'Identity','sample_id',true,null,null),
   ('sample','label','Label','Descriptive label for the sample.','text',null,null,false,20,'Identity','label',true,null,null),
@@ -26,3 +35,5 @@ insert into vault.field_definitions (entity,key,label,help,type,options_list_key
   ('measurement','notes','Notes','Free-form notes about the measurement.','longtext',null,null,false,200,'Notes','notes',false,null,null),
   ('file','kind','File kind','Category assigned to the uploaded file.','select','file_kinds',null,false,10,'File','kind',true,null,null)
 on conflict (entity, key) do nothing;
+
+commit;

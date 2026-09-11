@@ -1,4 +1,27 @@
+{
+	# NO PORT 80. Caddy binds :80 by default to serve HTTP->HTTPS redirects, and nginx already
+	# holds it on this box. The failure is
+	#     listening on :80: listen tcp :80: bind: address already in use
+	# which names a port this file never mentions, so it reads as a conflict on 443. Nothing here
+	# should be reachable over plain HTTP anyway: there is no request this door serves that is
+	# acceptable unencrypted, so a redirect is not a courtesy worth a listener.
+	#
+	# `disable_redirects`, NOT `auto_https off`. Turning auto_https off would also disable
+	# certificate management, and Caddy's own log line ("skipping automatic certificate management
+	# because one or more matching certificates are already loaded") shows it is already doing the
+	# right thing with the certificate `tailscale cert` wrote.
+	auto_https disable_redirects
+}
+
 edaserver.<tailnet>.ts.net {
+	# THE TAILNET INTERFACE ONLY. Without this Caddy listens on 0.0.0.0:443, and this host sits on
+	# three other networks besides the tailnet (a lab LAN, a management LAN and wifi). Binding
+	# everywhere would publish the data plane to all of them, which is not what "the tailnet door"
+	# means and is not what the runbooks claim happens.
+	#
+	# Substituted at install time from `tailscale ip -4` and `-6`, because the address is a
+	# per-host fact and a hardcoded one silently deploys the wrong thing on the next box.
+	bind <tailscale_bind>
 	tls <tailscale_cert_path> <tailscale_key_path>
 	encode zstd gzip
 	log {

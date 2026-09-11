@@ -10,6 +10,25 @@ function readCaddyfile(): string {
   return readFileSync(caddyfile, 'utf8')
 }
 
+/**
+ * The Caddyfile with comment lines removed, for checks about what Caddy will DO.
+ *
+ * The `auto_https off` assertion below failed on its first run against the comment written to
+ * explain why that setting is wrong -- a file documenting a rule has to be able to name the rule.
+ * Same shape as the `testingboard` grep in root-install.sh and the VAULT_IDENTITY matcher in
+ * tests/envVarParity.test.ts: match what is executed, not what is written about it.
+ */
+function stripComments(text: string): string {
+  return text
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n')
+}
+
+function caddyDirectives(): string {
+  return stripComments(readCaddyfile())
+}
+
 function dataPlaneHandlePaths(text: string): string[] {
   return [...text.matchAll(/^\s*handle_path\s+\/(?:rest|storage)\/v1\/\*\s*\{/gm)].map((match) => match[0].trim())
 }
@@ -61,5 +80,36 @@ describe('Caddy data-plane routing is safe', () => {
     // Forwarding this header lets a client present forged identity to the origin, which reads as
     // an authenticated request unless the application independently catches the forgery.
     expect(readCaddyfile()).toMatch(/^\s*request_header\s+-Cf-Access-Jwt-Assertion\s*$/m)
+  })
+
+  it('never binds port 80', () => {
+    // Caddy binds :80 by default to serve HTTP->HTTPS redirects. nginx already holds it on the
+    // target host, so the unit dies with
+    //     listening on :80: listen tcp :80: bind: address already in use
+    // which names a port the Caddyfile never mentions and therefore reads as a conflict on 443.
+    // Nothing this door serves is acceptable over plain HTTP, so the redirect is not worth a
+    // listener. `disable_redirects` rather than `auto_https off`, which would also switch off
+    // certificate management.
+    expect(caddyDirectives(), 'a global auto_https disable_redirects is what keeps Caddy off :80')
+      .toMatch(/auto_https\s+disable_redirects/)
+    expect(caddyDirectives(), 'auto_https off would disable certificate management too').not.toMatch(/auto_https\s+off/)
+  })
+
+  it('binds only named addresses, never every interface', () => {
+    // The target host is on three networks besides the tailnet. Without a bind directive Caddy
+    // listens on 0.0.0.0:443 and publishes the data plane to all of them -- while every runbook
+    // says "the tailnet door". The address itself is a per-host fact and stays a placeholder here;
+    // what is pinned is that the directive exists and that nothing re-widens it.
+    expect(caddyDirectives(), 'the site block must carry a bind directive').toMatch(/^\s*bind\s+\S+/m)
+    expect(caddyDirectives(), 'binding 0.0.0.0 would defeat the point of the bind directive').not.toMatch(/bind\s+0\.0\.0\.0/)
+  })
+
+  it('comment stripping does not blind the directive checks', () => {
+    // Narrowing a check is how a check quietly stops checking. A commented-out directive must not
+    // satisfy it, and a real one must still be seen.
+    // Exercises the SAME stripComments the assertions above use, not a second copy of the logic.
+    expect(stripComments('# auto_https disable_redirects\n')).not.toMatch(/auto_https\s+disable_redirects/)
+    expect(stripComments('\tauto_https disable_redirects\n')).toMatch(/auto_https\s+disable_redirects/)
+    expect(stripComments('# bind 0.0.0.0\n\tbind 100.1.2.3\n')).not.toMatch(/bind\s+0\.0\.0\.0/)
   })
 })

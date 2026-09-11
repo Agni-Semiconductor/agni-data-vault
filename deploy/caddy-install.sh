@@ -6,8 +6,11 @@
 #
 # ─── WHAT THIS OPENS, AND WHAT IT DOES NOT ─────────────────────────────────────────────────
 # After this, https://<this host>.<tailnet>.ts.net/rest/v1/... and /storage/v1/... are reachable
-# from any device on the tailnet. NOTHING is reachable from the internet: Caddy binds the tailnet
-# address, and no inbound port is opened at the edge.
+# from any device on the tailnet, and from NOWHERE ELSE. That is enforced, not assumed: the
+# Caddyfile carries a `bind` directive naming this host's tailscale addresses, substituted in at
+# step 5, and step 7 asserts afterwards that the listener is on those addresses and not on
+# 0.0.0.0. The first version of this file claimed the tailnet binding in prose while the config
+# actually listened on every interface -- and this host is on three other networks.
 #
 # THE TAILNET IS NOT THE GATE. Every path behind this door independently validates a credential --
 # /rest/v1 and /storage/v1 against the HS256 service JWT that PostgREST and fed_storage share.
@@ -71,6 +74,28 @@ if [ -n "$DOMAIN" ]; then
   ok "tailnet name: $DOMAIN"
 else
   bad "could not read this node's MagicDNS name from tailscale status"
+fi
+
+# The addresses Caddy will bind. Read from the daemon rather than typed: a wrong one either fails
+# to bind (loud) or binds something else (quiet), and the quiet one is how a door ends up open on a
+# network nobody meant to serve.
+BIND4=$(tailscale ip -4 2>/dev/null | head -1)
+BIND6=$(tailscale ip -6 2>/dev/null | head -1)
+BINDADDR=$(printf '%s %s' "$BIND4" "$BIND6" | sed 's/  */ /g; s/^ //; s/ $//')
+if [ -n "$BIND4" ]; then
+  ok "will bind the tailnet addresses only: $BINDADDR"
+else
+  bad "could not read a tailscale IPv4 address -- refusing to fall back to 0.0.0.0"
+fi
+
+# :80 is NOT ours and must not be fought over. Caddy binds it by default for HTTP->HTTPS redirects;
+# the Caddyfile disables that. Reported here so the reason is on the record when somebody wonders
+# why plain HTTP does nothing.
+p80=$(ss -lntH 2>/dev/null | awk '{n=split($4,a,":"); if (a[n]=="80") print}' | head -1)
+if [ -n "$p80" ]; then
+  ok "port 80 is held by something else -- Caddy will not bind it (auto_https disable_redirects)"
+else
+  ok "port 80 free -- Caddy still will not bind it, by config"
 fi
 
 # The shim must already be serving. Caddy in front of a dead upstream gives a 502 that reads as a
@@ -183,6 +208,7 @@ step "5. The Caddyfile, with the placeholders resolved"
 sed -e "s|edaserver\.<tailnet>\.ts\.net|$DOMAIN|" \
     -e "s|<tailscale_cert_path>|$CERT|" \
     -e "s|<tailscale_key_path>|$KEY|" \
+    -e "s|<tailscale_bind>|$BINDADDR|" \
     "$UNITSRC/Caddyfile" > /etc/caddy/Caddyfile
 chmod 0644 /etc/caddy/Caddyfile
 if grep -q '<tailscale_\|<tailnet>' /etc/caddy/Caddyfile; then
@@ -274,6 +300,29 @@ else
   journalctl -u caddy -n 12 --no-pager | sed 's/^/      /'
   denials=$(ausearch -m avc -ts recent 2>/dev/null | grep -c denied)
   [ "${denials:-0}" -gt 0 ] && { printf '      \033[33m%s SELinux denial(s):\033[0m\n' "$denials"; ausearch -m avc -ts recent 2>/dev/null | grep denied | tail -3 | sed 's/^/        /'; }
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+step "7b. Where Caddy is actually listening"
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# The claim in this file's header, checked against the kernel rather than against the config that
+# was supposed to produce it. A `bind` directive that silently did not apply leaves a door open on
+# three other networks and nothing anywhere says so.
+if systemctl is-active --quiet caddy; then
+  listens=$(ss -lntH 2>/dev/null | awk '{n=split($4,a,":"); if (a[n]=="443") print $4}' | sort -u)
+  if [ -z "$listens" ]; then
+    bad "caddy is active but nothing is listening on 443"
+  else
+    printf '%s\n' "$listens" | sed 's/^/      /'
+    if printf '%s\n' "$listens" | grep -qE '^(0\.0\.0\.0|\*|\[::\]):443$'; then
+      bad "443 is bound on ALL interfaces -- the bind directive did not apply, and this host is on three other networks"
+    else
+      ok "443 is bound only on the tailnet address(es)"
+    fi
+  fi
+  ss -lntH 2>/dev/null | awk '{n=split($4,a,":"); if (a[n]=="80") print}' | grep -q caddy \
+    && bad "caddy is listening on :80 -- auto_https disable_redirects did not apply" \
+    || ok "caddy is not listening on :80"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════════════════

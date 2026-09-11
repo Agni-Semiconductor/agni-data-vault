@@ -195,10 +195,43 @@ WantedBy=multi-user.target
   denied and you see a **502**.
 - `semanage port -a -t http_port_t -p tcp <port>` — binding a non-standard port is denied by
   default.
-- `semanage fcontext` + `restorecon -Rv` for every new directory.
-- Debug ritual: `sudo ausearch -m avc -ts recent`. **Suspect SELinux first.**
 - `systemctl enable` everything. A reboot that comes back with nothing running is the same outage
   as a crash, and nobody notices for hours.
+
+### SELinux: a service checkout under `/srv` is not executable by default
+
+When a new service will not start, run `sudo ausearch -m avc -ts recent` **first**, not after
+checking modes and owners. On this host, suspect SELinux first: both failures below occurred with
+correct ownership and permissions, and neither symptom names SELinux or a label.
+
+- `Failed to load environment files: Permission denied` means PID 1 (`init_t`) could not read the
+  unit's `EnvironmentFile`. Root reading the same file from a shell proves nothing: policy forbids
+  `init_t` from reading `user_home_t`.
+- `Failed to locate executable ...: Permission denied` reads as a missing file, but systemd can
+  reach that message when it cannot execute the interpreter. Here the denial was on the interpreter
+  symlink (`tcontext=user_home_t`, `tclass=lnk_file`), not a missing target.
+
+The natural layout causes this: `fedbackup` has home `/srv/fedbackup`, so its testbench checkout at
+`/srv/fedbackup/ferrodiode-pcb-testbench` inherits `user_home_dir_t` / `user_home_t`. A dedicated
+service account and a checkout in that account's home are therefore not enough to make systemd read
+or execute the files.
+
+Use three labels, each for the access systemd or the service actually needs:
+
+- `<checkout>/server/config` is `etc_t`, so systemd can read `secrets.env`.
+- `/srv/fedbench/venv/bin` is `bin_t`, so systemd can execute the interpreter.
+- `<checkout>/server/src` is `usr_t`, so the service can import its code.
+
+`fed-postgrest` started in the same run because `/usr/local/bin/postgrest` was already `bin_t`.
+That label permits execution and lets the service transition out of `init_t`; `fed-storage`, whose
+`ExecStart` used the bench checkout's `.venv/bin/python`, did not get that transition. The contrast
+is the diagnosis, not evidence that the units are configured differently.
+
+`semanage fcontext` records a rule only. Follow it with `restorecon -R` to apply the rule to the
+files: without the relabel, the command looks like a fix but the old context remains and the same
+misleading errors continue. The practical rule is to put a service executable somewhere already
+labelled `bin_t`, or label the service's own venv `bin` directory, rather than execute an
+interpreter out of a home directory.
 
 ### Port map — pick from this, don't guess
 

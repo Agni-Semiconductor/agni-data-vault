@@ -276,8 +276,11 @@ it as `EnvironmentFile` and the deploy account never needs to see it. **Nothing 
 
 actually reads are the ones in the table above, and `.env.example` is the copy to trust.
 
-**`PGRST_JWT_SECRET` is in no dump.** Losing that string bricks the entire data plane. Store it out
-of band (SOPS + `age`). It must be ≥32 characters or PostgREST refuses to start — the one
+**`PGRST_JWT_SECRET` is in no dump.** It is minted once and lives only in
+`<checkout>/server/config/secrets.env`, mode `0600`, owned by `fedbackup`; losing it bricks the
+entire data plane, and regenerating it is not recovery. Store it out of band (SOPS + `age`). The
+directory must be labelled `etc_t`, or systemd cannot read the environment file even though its mode
+and ownership are correct. It must be ≥32 characters or PostgREST refuses to start — the one
 misconfiguration in this file that fails loudly. It must be the **same value** as
 `FED_PGRST_JWT_SECRET`, and if you generate it as base64 you must also set
 `PGRST_JWT_SECRET_IS_BASE64=true`, or the HMAC input differs between PostgREST and
@@ -288,7 +291,10 @@ which reads as **the archive is corrupt** rather than **the secret is wrong**.
 
 ## 5. The data plane: PostgREST, `fed_storage`, the nginx shim
 
-Nothing is on 3000, 3001 or 8087 today, so all three are a clean install.
+PostgREST 16.3 listens on `127.0.0.1:3000`, `fed_storage` on `127.0.0.1:3001`, and the nginx shim
+on `127.0.0.1:8087`; `ss -lnt` verifies that all three are loopback only. Caddy, the Tailscale
+certificate and the Cloudflare tunnel are not configured yet, so nothing is reachable from the
+tailnet.
 
 **Take the x86_64 PostgREST build.** Every install note in the testbench repo hardcodes aarch64.
 
@@ -301,10 +307,11 @@ PGRST_JWT_SECRET=<the out-of-band secret>
 
 `public` first because it is the default profile and the bench's client never sends `Accept-Profile`
 on any of its seven verbs. `bench_read` as the anon role because it holds zero grants, so an
-unauthenticated request gets a 403 and never an empty array. `extensions` on the extra search path
-because `citext` and `pg_trgm` were installed into that schema rather than into `public`, and
-without it a query touching a `citext` column fails with `type "citext" does not exist` — which
-reads as a missing extension rather than as a missing search path.
+unauthenticated request gets Postgres `42501` `permission denied` as HTTP 401 and never an empty
+array. This is verified on `public/captures`, `vault/samples`, and `connect/kinds`. `extensions` on
+the extra search path because `citext` and `pg_trgm` were installed into that schema rather than
+into `public`, and without it a query touching a `citext` column fails with `type "citext" does not
+exist` — which reads as a missing extension rather than as a missing search path.
 
 **Keep `nginx-fedbench.conf` verbatim.** It exists because `supabase-js` appends `/rest/v1` to its
 base URL: the shim is what lets the bench's seven verbs and the vault's own client work unchanged,
@@ -312,21 +319,56 @@ and pointing a client straight at PostgREST 404s everything. It fronts PostgREST
 `fed_storage` on 3001, and it strips the prefix exactly once via a trailing slash on `proxy_pass` —
 which is why Caddy above it uses `handle` rather than `handle_path` (§6).
 
+The live nginx routes are `/rest/v1/` to `127.0.0.1:3000/`, which strips that prefix, and
+`/storage/v1/` to `127.0.0.1:3001`, which does not. Everything else is 404. With a `connect_read`
+token, `connect.kinds` returns seven rows through that full path. `connect.health` correctly returns
+all zeros today: the 19 selfhost migrations, `0100` through `0118` (not `0115`), created the schema,
+but no vault data has been migrated from hosted Supabase yet. All three services are enabled and
+active.
+
 `fed_storage` serves both buckets from one root with roles **per bucket and per verb**: the `bench`
 bucket is readable by `bench_service` and `vault_service`, writable only by `bench_service`, and
 deletable by nobody — 405, even with a valid bench token. Collapsing these into one role per bucket
 looks tidier, passes every other test in the file, and breaks capture serving with a 401 that reads
 as a bad token. Three tests guard it for that reason.
 
+`fed_storage` serves the live object root from `/srv/fedbench/objects`, mode `0750`, owned by
+`fedbackup`, on the RAID1 root. Its health response is
+`{"ok":true,"root":"/srv/fedbench/objects","writable":true}`. Do not serve
+`/srv/nextcloud/fedbench/objects`: that is the nightly cold archive on a single non-redundant 7.3T
+disk, so using it live would make backup and primary the same directory.
+
 ### SELinux is enforcing, and each of these fails as something else
 
 ```bash
 sudo setsebool -P httpd_can_network_connect 1      # else nginx→loopback is denied and you see a 502
 sudo semanage port -a -t http_port_t -p tcp 8087   # else nginx cannot bind and the unit fails at start
-sudo semanage fcontext -a -t httpd_sys_content_t '/srv/vault/www(/.*)?'
-sudo restorecon -Rv /srv/vault/www
+sudo semanage fcontext -a -t etc_t '/srv/fedbackup/ferrodiode-pcb-testbench/server/config(/.*)?'
+sudo semanage fcontext -a -t bin_t '/srv/fedbench/venv/bin(/.*)?'
+sudo semanage fcontext -a -t usr_t '/srv/fedbackup/ferrodiode-pcb-testbench/server/src(/.*)?'
+sudo restorecon -Rv /srv/fedbackup/ferrodiode-pcb-testbench/server/config /srv/fedbench/venv/bin /srv/fedbackup/ferrodiode-pcb-testbench/server/src
 sudo ausearch -m avc -ts recent                    # the debug ritual: suspect SELinux first
 ```
+
+`semanage fcontext` records the rule; `restorecon -R` applies it. Running the former without the
+latter looks like a fix and is not. These three labels cover different accesses: `etc_t` lets
+systemd read `secrets.env`, `bin_t` lets systemd execute the interpreter, and `usr_t` lets the
+service import its code.
+
+`fedbackup` has `HOME=/srv/fedbackup`, so its testbench checkout at
+`/srv/fedbackup/ferrodiode-pcb-testbench` is labelled `user_home_dir_t` / `user_home_t`. This makes
+two ordinary unit settings fail for different reasons. PID 1 reads `EnvironmentFile` as `init_t`,
+and policy forbids `init_t` reading `user_home_t`; the unit says `Failed to load environment files:
+Permission denied` even when mode and owner are correct and root can read the file from a shell.
+PID 1 also cannot execute a binary labelled `user_home_t`: when `ExecStart` named the bench
+`.venv/bin/python`, the unit said `Failed to locate executable ...: Permission denied`, which reads
+as a missing file. The denial was the symlink, `tcontext=user_home_t tclass=lnk_file`, not a missing
+interpreter or label mentioned by the error. On this host, suspect SELinux first and use
+`sudo ausearch -m avc -ts recent`.
+
+`fed-postgrest` started in that same run because `/usr/local/bin/postgrest` is `bin_t`: `bin_t`
+permits execution and the service transitions out of `init_t`. That contrast is the diagnosis, not
+evidence that the other units have correct ownership or paths.
 
 **Install every unit with `cp`, never `mv`.** A moved file keeps its source SELinux context and
 systemd then refuses to load it, with an error that reads as a malformed unit — so the next hour
@@ -336,6 +378,12 @@ goes on the unit file, which is fine.
 sudo cp deploy/vault-api.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now vault-api
 ```
+
+`fed-storage` has its own virtualenv at `/srv/fedbench/venv`, created from `/usr/bin/python3`
+(`3.9.25`). Do not use the bench `.venv` for it: uv deliberately builds that virtualenv without pip,
+so `python -m pip` says `No module named pip`, and `ensurepip` did not repair it. A system-Python
+venv has pip and keeps the vault data path out of uv management, because `uv sync` prunes the
+editable `keithley-control` install a running campaign depends on.
 
 `node` is not installed on this box; install it before enabling the unit. The unit runs as
 `vaultsvc` out of `/srv/vault/app` under `ProtectSystem=strict` and `NoNewPrivileges=true`.

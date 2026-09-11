@@ -22,7 +22,14 @@ operator's document and explains why each piece is shaped the way it is.
 
 > **Migrating off hosted Supabase.** Those projects stay up and unpaused until their cold archives
 > are restore-verified; `supabase/migrations/0001–0006` remain as the historical record of that
-> deployment. The self-hosted track is `supabase/migrations/selfhost/0100–0115`.
+> deployment. The self-hosted track is `supabase/migrations/selfhost/0100–0118`.
+
+**Data-plane status (2026-09-11).** The data plane is now **LIVE** on `edaserver`: PostgREST,
+`fed_storage`, and the nginx shim are active on loopback, all 19 migrations are applied, and the
+full path was verified end to end with a real token. It is loopback-only because Caddy, the
+Tailscale certificate, and the Cloudflare tunnel are not done, so nothing is reachable from the
+tailnet yet. No vault data has been migrated from hosted Supabase; the tables are empty by design,
+so zero-row health is not evidence of a failed schema migration.
 
 ## Local development
 
@@ -43,8 +50,11 @@ bench's own schema:
 
 ```bash
 psql -d fedbench -v ON_ERROR_STOP=1 -f server/deploy/selfhost_schema.sql   # the bench, in `public`
-for f in supabase/migrations/selfhost/0*.sql; do psql -d fedbench -v ON_ERROR_STOP=1 -f "$f"; done
+bash deploy/apply-migrations.sh --db fedbench
 ```
+
+Use the script rather than a shell loop: it keeps a sha256 ledger, so a migration edited after it
+was applied is detected rather than silently diverging.
 
 Two invariants that fail **silently** if you get them wrong:
 

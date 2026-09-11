@@ -1,16 +1,34 @@
 # Backfill and labeling campaign — plan
 
-> **Status (2026-09-10): the storage constraint that shaped this plan is gone, and so is one of
-> its two compromises.**
+> **Status (2026-09-11): the storage constraint that shaped this plan is gone, one of its two
+> compromises is gone with it, and the replacement figure this header carried on 2026-09-10 was
+> itself wrong.**
 >
-> This plan was written against a 1 GB hosted Supabase tier holding a 4,289 MB archive, which is
+> This plan was written against a 1 GB hosted Supabase tier holding a 4,289 MB corpus, which is
 > why it defers a Pro upgrade, excludes the 128×128 mega run, and calls the 16,821 campaign CSVs
-> "pointer-only". On `edaserver` there is a 1 TB allocation, so **no storage upgrade is needed
-> for any phase** and no phase is excluded for size.
+> "pointer-only". That tier is no longer the target.
+>
+> **WRONG, and this header is what said it: "on `edaserver` there is a 1 TB allocation".** There
+> is no single allocation. Read off the box on 2026-09-11 there are four volumes, and the way they
+> differ is the part that matters:
+>
+> | Mount | Size | Used | Redundancy | What lives there |
+> |---|---|---|---|---|
+> | `/` | 888 G | 28 G | **RAID1**, two NVMe | PostgreSQL — `PGDATA=/var/lib/pgsql/17/data`, **861 G free** |
+> | `/storage` | 3.8 T | 824 G | **RAID1**, two NVMe | — |
+> | `/srv/nextcloud` | 7.3 T | 55 G | **single disk, no RAID** | the nightly `fedbench` archive |
+> | `/mnt/nasbackup` | 11 T | 4.6 T (6 T free) | NFS → `10.10.10.50:/volume1/server-backups` | — |
+>
+> **No storage upgrade is needed for any phase and no phase is excluded for size** — the entire
+> 4,289 MB corpus is half a percent of the 861 G free on the mirrored root — but "it all fits on
+> one big disk" was never the reason and is not the reason now. Which volume a byte lands on is a
+> separate question from whether there is room for it, and the volume this plan leans on for
+> evidence, `/srv/nextcloud`, is the one with no redundancy.
 >
 > **Pointer-only turned out to be the right design rather than a budget compromise, and it is now
-> implemented.** `vault.files.bucket` (migration `0108`) lets a vault `files` row point at
-> `bucket='bench', storage_path='captures/…'`, and `GET /api/files/:id/content` serves it from the
+> implemented.** The storage-pressure half of the original argument is dead; the duplication half
+> was always the load-bearing one and nothing above touches it. `vault.files.bucket` (migration
+> `0108`) lets a vault `files` row point at `bucket='bench', storage_path='captures/…'`, and `GET /api/files/:id/content` serves it from the
 > bench's own objects. Those bytes are already on the same disk — the nightly archive writes
 > `<archive>/objects/bench/<storage_path>`, byte-for-byte the tree `fed_storage` serves — so
 > copying them into a `vault/` bucket would make a *third* copy of bytes that are already there.
@@ -22,8 +40,23 @@
 > public.captures` against the archive's hashes for `Agni/data/August 1st 128 mega run`. If they
 > match, they are the same bytes and pointers are correct — 2,328 MB saved and "pointer-only" was
 > right all along, merely badly named. If they do not, it is a separate export and should be
-> uploaded; 2.3 GB against 1 TB is nothing. **Either way the answer comes from the hashes, not from
-> a storage budget**, which is the sentence this header exists to replace.
+> uploaded; 2,328 MB against 861 G free is nothing. **Either way the answer comes from the hashes,
+> not from a storage budget**, which is the sentence this header exists to replace.
+>
+> **What that hash comparison reads, and what it does not prove.** The other side of the comparison
+> is the nightly `fedbench` archive under `/srv/nextcloud`, and it is **healthy and current**: it
+> last ran 2026-09-11 at 02:07:43 to watermark `captures.id <= 25794`, 51,671 rows across 11
+> tables, an object tree of **904.0 MB in 25,786 files**, manifest written to
+> `/srv/nextcloud/fedbench/manifests/`. Every `fedbench-*` timer fires on schedule, so the hashes
+> are there to compare against today. But `fedbench-verify` has **never run once** —
+> `ExecMainStartTimestamp` is empty, and it next fires 2026-10-01 — so **the archived bytes are
+> provably intact and nobody has ever proved they come back as a working database**. A hash match
+> proves the mega run's bytes are the same bytes; it proves nothing about restorability, and no
+> part of this campaign should be read as having proved it.
+>
+> Two different things in this repo are called "the archive", and conflating them makes the
+> comparison above look circular: the **corpus** is the 4,289 MB of source data this plan ingests,
+> the **archive** is the 904.0 MB nightly pull of bench objects. Every size in §3 is the corpus.
 >
 > Everything below about evidence classes, the sure-only rule, the review queue and the hard rules
 > for agents is **unchanged and still governs** — that is the part of this plan that was never
@@ -63,14 +96,14 @@ Caveat on `inventory.csv`: `diameter_um` and `T_meas_C` there are registry defau
 |---|---|---|---|
 | `Agni/data` Clarius exports (`.xls/.xlsx`) | 2,106 | see §3a | Phase A — upload bytes + full labels |
 | `Agni/data/supabase campaigns` board CSVs | 16,821 | 1,012 MB | **not uploaded**; already in the `automated-testing` Supabase project. Phase C registers one measurement per campaign run with `meta.external = {project: yabtiaqddwurmurmowvk, table: captures, campaign_run_id}` and attaches only the derived summary CSVs (manifest, device_labels_v2, yield) |
-| `Agni/data/August 1st 128 mega run` (128×128 board run, excluded from the registry inventory) | 4,398 | 2,328 MB | Phase C decision: either Pro storage + bulk upload as one measurement per board run, or pointer-only like the campaigns. It is 54% of the whole archive; default is pointer-only until Spencer says otherwise |
+| `Agni/data/August 1st 128 mega run` (128×128 board run, excluded from the registry inventory) | 4,398 | 2,328 MB | Phase C **determination, not a decision**: compare `public.captures.content_sha256` against the archive's hashes. Match → same bytes, so pointers; no match → a separate export, uploaded as one measurement per board run. It is 54% of the corpus, and that fraction now decides nothing — 2,328 MB against 861 G free is noise. **The hashes decide, not the size.** |
 | other 8x8 / board / socket folders (`8x8 Board`, `7_27 full8x8test`, `8x8 Testing Board 7_13`, `7_24 D2P2 8x8 samples`, `8_4 HEATED Write disturb 8x8`, `8_26 Socket Testing`, `9_4 Board Testing`) | ~860 | ~110 MB | Phase A2 — same tool; sample container per board/chip, device_address from filename tokens; labels limited to E1–E3 |
 | `Work Flows/Data Processing/FeD Electrical Data` | ~1,158 | not yet measured | Phase B — same tool, second root |
 | `Model/data/raw` (literature + Han2026 crossbar) | ~408 | not yet measured | Phase B, tagged `meta.origin = literature` where the registry says so |
 | images (`.png` 2,853 = 290 MB, `.bmp` 93 = 313 MB) | 2,946 | 603 MB | plots and screenshots; attach only when a filename ties them to a run (`DC-IV_Run4482.png`), as `kind: plot_png`; the 93 BMP microscope/scope screenshots wait for Phase B |
 | decks/notes used as evidence (`.pptx` 8 files 23.5 MB, `.md`, `.txt`) | ~90 | 24 MB | not uploaded as measurement files; cited in `meta.evidence`; a deck is attached once to its sample as `kind: other` |
 
-Whole archive: 4,289 MB. Phase A (239 MB) plus Phase A2 (~110 MB) stays under the free tier; everything beyond that needs Pro or pointers.
+Whole corpus: 4,289 MB. **Wrong here too, by inheritance from the free tier: "everything beyond Phase A2 needs Pro or pointers."** No phase is bounded by capacity any more — corpus and archive together are under 1% of the 861 G free on `/`. What still bounds Phase C is **duplication**: the campaign CSVs are already objects in the `bench` bucket, so a copy under `vault/` would be a third copy of bytes on the same disk.
 
 §3a Storage numbers (from `inventory.csv` sizes, 2026-09-09):
 
@@ -84,7 +117,7 @@ Whole archive: 4,289 MB. Phase A (239 MB) plus Phase A2 (~110 MB) stays under th
 | cv | 16 | 0.2 |
 | **Phase A total** | **2,106** | **239.2** (avg 116 kB; 364 unmapped = 41.7 MB; 8 duplicates) |
 
-Phase A fits the free tier (1 GB) with room; no Pro upgrade needed before it starts. Pro ($25/mo, 100 GB) is scheduled before Phase B (second roots, size not yet measured — the OneDrive folders are partly cloud-only placeholders, so a byte scan over them stalls; the executor must expect on-demand hydration and read files sequentially). The 16,600 board-campaign CSVs are never uploaded (Phase C is pointers only).
+**No Pro upgrade is scheduled before any phase; there is no tier to upgrade.** The Phase B caveat that sat beside that sentence is not a storage-capacity claim and still holds: the second roots' size is not yet measured because the OneDrive folders are partly cloud-only placeholders, so a byte scan over them stalls — the executor must expect on-demand hydration and read files sequentially. The 16,600 board-campaign CSVs are still never uploaded, now for the duplication reason rather than the budget one (Phase C is pointers only).
 
 ## 4. Architecture: deterministic first, agents second, humans last
 
@@ -115,7 +148,7 @@ OpenAI quota is near its cap, so Terra is limited to the parts that need careful
 | # | part | kind | model | est | deliverable |
 |---|---|---|---|---|---|
 | 0 | contract + specs | plan | Fable | 8k | `docs/BACKFILL_CONTRACT.md`: evidence classes, plan.jsonl schema, dossier.json schema, queue CSV columns |
-| 1 | scan + storage decision | retrieve | GLM script | 10k | `backfill/scan.json` bytes/counts per corpus; Spencer decides Pro |
+| 1 | corpus scan | retrieve | GLM script | 10k | `backfill/scan.json` bytes/counts per corpus. **No storage decision rides on it any more** — it feeds the Phase C sha256 comparison and the coverage report |
 | 2 | field definitions for the campaign | convert | GLM | 8k | SQL/API calls adding the rows in §4 (idempotent) |
 | 3 | `cli/backfill.py plan` | draft-code | GLM (Terra review) | 40k | reads inventory/quality/registry, walks folders, emits plan.jsonl with evidence; dry-run report; unit tests on 20 real filenames |
 | 4 | deck/notes text extraction | draft-code | GLM | 15k | `cli/extract_evidence.py`: python-pptx + md/txt → `backfill/evidence/<folder>/*.txt` with slide numbers (deterministic, no LLM) |
@@ -131,7 +164,7 @@ Estimated pool use: GLM ~330k tokens (≈ $0.10), Terra ~250k (well under one Co
 
 ## 6. Order of operations
 
-1. Part 0–2 (one hour): contract, scan, field rows. Spencer decides Pro upgrade and confirms the provisional-sample naming.
+1. Part 0–2 (one hour): contract, scan, field rows. Spencer confirms the provisional-sample naming; there is no longer a Pro upgrade to decide.
 2. Parts 3, 4, 7 in parallel on GLM; part 5 dossiers start as soon as part 4's extracted text exists.
 3. Part 6 on Terra while GLM works; part 8 on Terra after part 3's plan schema is frozen.
 4. Part 9 pilot: 100 files, checked in the app (plots render, fields show provenance chips, queue items visible via the `review_needed` filter).
@@ -147,7 +180,7 @@ Estimated pool use: GLM ~330k tokens (≈ $0.10), Terra ~250k (well under one Co
 
 ## 8. Decisions needed from Spencer before part 3 starts
 
-1. Supabase Pro now, or Phase A on the free tier first (depends on §3a numbers).
+1. ~~Supabase Pro now, or Phase A on the free tier first (depends on §3a numbers).~~ **Answered by the box rather than by Spencer: there is no tier and no upgrade.** One real storage question outlives it, and it is not a budget: the archive this campaign would read its comparison hashes from sits on `/srv/nextcloud`, the **one volume with no redundancy**, and `fedbench-verify` has never run — so Phase C may depend on those hashes, but nothing here may be read as evidence that they are recoverable.
 2. Provisional sample naming `F_<folder-slug>` acceptable? Alternative: leave unmapped files under a single `UNSORTED` sample.
 3. OpenAI cap: hold Terra to ~15 dossier dispatches plus the executor and review, or push everything to GLM from the start.
 4. Whether decks/notes may be uploaded to the vault as sample attachments (they are Agni-internal; storage cost is small).

@@ -228,8 +228,27 @@ fi
 [ -x "$PGRST_SRC" ] && ok "PostgREST binary staged at $PGRST_SRC ($("$PGRST_SRC" --version 2>/dev/null))" \
   || bad "no PostgREST binary at $PGRST_SRC"
 
+# WHO holds the port, not just whether it is held. The first version asked only "is anything
+# listening", which made this script fail on its own success: step 6 starts nginx on 8087, so the
+# very next run reported `port 8087 already in use` and refused to do anything. A script that
+# advertises itself as idempotent has to survive having worked.
+#
+# A port held by the service this script installs is fine -- step 6 reloads or restarts it. A port
+# held by ANYTHING ELSE is still a stop, because that is a genuine collision with whatever else
+# lives on this box.
+port_owner() {
+  ss -lntpH 2>/dev/null | awk -v want="$1" '{ n = split($4, a, ":"); if (a[n] == want) print }' \
+    | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1
+}
 for p in 3000 3001 8087; do
-  ss -lnt 2>/dev/null | grep -q ":$p " && bad "port $p already in use" || ok "port $p free"
+  owner=$(port_owner "$p")
+  case "$p:$owner" in
+    *:)                       ok   "port $p free" ;;
+    3000:postgrest)           ok   "port $p held by postgrest — this script manages it" ;;
+    3001:python*|3001:uvicorn*) ok "port $p held by $owner — this script manages it" ;;
+    8087:nginx)               ok   "port $p held by nginx — this script manages it" ;;
+    *)                        bad  "port $p is held by '$owner', which this script does not manage" ;;
+  esac
 done
 
 if [ "$fail" -gt 0 ]; then

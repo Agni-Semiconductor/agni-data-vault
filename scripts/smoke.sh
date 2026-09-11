@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Live invocation:
+# VAULT_API_URL=https://edaserver.tailcb2a72.ts.net VAULT_API_KEY=<key> bash scripts/smoke.sh
+# The key lives in /etc/vault/vault-api.env on the server, readable only by root.
+# This writes REAL DATA through the API: one sample, measurement, file, and file content. It
+# deletes the sample at the end; cleanup failures are reported and retried so the system of record
+# is not left with smoke-test debris silently.
+set -uo pipefail
 
 if [[ -f .env.local ]]; then
   set -a; source .env.local; set +a
@@ -8,9 +14,33 @@ fi
 : "${VAULT_API_KEY:?Set VAULT_API_KEY}"
 API="${VAULT_API_URL%/}/api"
 AUTH="Authorization: Bearer $VAULT_API_KEY"
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d); SAMPLE_ID=""; CLEANED=0
 status() { local label=$1 output=$2 wanted=$3 code; shift 3; code=$(curl -sS -o "$output" -w '%{http_code}' "$@"); echo "$label -> $code"; [[ "$code" == "$wanted" ]]; }
 json() { python3 -c "$1"; }
+cleanup() {
+  if [[ -n "$SAMPLE_ID" && "$CLEANED" -eq 0 ]]; then
+    echo "CLEANUP: deleting sample $SAMPLE_ID after an earlier failure"
+    local code
+    code=$(curl -sS -o "$TMP/cleanup.json" -w '%{http_code}' -X DELETE -H "$AUTH" "$API/samples/$SAMPLE_ID") || code="curl_failed"
+    if [[ "$code" == 200 ]]; then
+      echo "CLEANUP: sample $SAMPLE_ID deleted"
+    else
+      echo "CLEANUP FAILED: DELETE /samples/$SAMPLE_ID -> $code"
+      [[ -f "$TMP/cleanup.json" ]] && cat "$TMP/cleanup.json"
+    fi
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+HEALTH="$TMP/healthz.json"
+HEALTH_CODE=$(curl -sS -o "$HEALTH" -w '%{http_code}' "${VAULT_API_URL%/}/healthz") || HEALTH_CODE="curl_failed"
+if [[ "$HEALTH_CODE" != 200 ]] || ! json 'import json,sys; assert json.load(open(sys.argv[1])).get("ok") is True' "$HEALTH"; then
+  echo "GET /healthz -> $HEALTH_CODE (database check is failing or the API is unreachable)"
+  [[ -f "$HEALTH" ]] && cat "$HEALTH"
+  exit 1
+fi
+echo "GET /healthz -> $HEALTH_CODE"
 
 SCHEMA="$TMP/schema.json"
 status 'GET /schema' "$SCHEMA" 200 -H "$AUTH" "$API/schema"
@@ -40,6 +70,11 @@ DOWNLOAD_PATH=$(json 'import json,sys; d=json.load(open(sys.argv[1])); assert d[
 DOWNLOADED="$TMP/downloaded.csv"; status 'GET /files/:id/content' "$DOWNLOADED" 200 -H "$AUTH" "${VAULT_API_URL%/}$DOWNLOAD_PATH"
 cmp "$CSV" "$DOWNLOADED"
 DELETE_OUT="$TMP/delete.json"; status 'DELETE /samples/:id' "$DELETE_OUT" 200 -X DELETE -H "$AUTH" "$API/samples/$SAMPLE_ID"
+if [[ "$?" -eq 0 ]]; then
+  CLEANED=1
+else
+  echo "CLEANUP FAILED: the smoke sample was not deleted; the EXIT cleanup will retry"
+fi
 MISSING="$TMP/missing.json"; status 'GET deleted file download' "$MISSING" 404 -H "$AUTH" "$API/files/$FILE_ID/download"
 
 # --- Part 2 surfaces -------------------------------------------------------

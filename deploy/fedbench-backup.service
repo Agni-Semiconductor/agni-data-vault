@@ -1,0 +1,28 @@
+# Create the local fedbench database backup pair. Run by fedbench-backup.timer -- enable the
+# TIMER, not this unit, because enabling a completed oneshot would run a backup at every boot.
+#
+# This remains a local backup on the database host, not an off-host copy. Calling it a second
+# physical copy would mislead a cutover decision while the host is still a single point of failure.
+
+[Unit]
+Description=Create the nightly local fedbench database backup
+
+[Service]
+# A backup is a task that finishes, not a daemon. Restarting a completed task can create an
+# unexpected second dump, so this unit deliberately has no Restart= setting.
+Type=oneshot
+# fedbackup is the existing non-root account that runs the fedbench data services; it can read the
+# database and owns its backup output, unlike root-owned output which later reads as a dump failure.
+User=fedbackup
+ExecStart=/srv/fedbackup/ferrodiode-pcb-testbench/deploy/backup-fedbench.sh
+# Keep the installed system and configuration read-only; a writable system tree can turn a failed
+# backup into an apparent later application fault instead of containing the write to its output.
+ProtectSystem=full
+# Isolate /tmp so a stale temporary file from another service cannot be mistaken for this dump.
+PrivateTmp=true
+# The backup needs no privilege escalation; permitting it would make a client-side failure a host
+# privilege incident instead.
+NoNewPrivileges=true
+# The script may create, publish, and prune backup pairs only here. ProtectHome must not be made
+# strict enough to block fedbackup reading its checkout, or systemd reports 203/EXEC instead.
+ReadWritePaths=/srv/fedbench/backups

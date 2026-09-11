@@ -12,14 +12,12 @@ nothing has exercised yet — treat the difference as load-bearing.
 ## 1. What talks to what
 
 ```
-┌─ PUBLIC DOOR ─────────────────────────────────────────────────────┐
-│ browser → vault.agnisemi.ai   (Cloudflare; Access = Workspace SSO)│
-│   /        → origin: Vercel      (SPA, no secrets, no VITE_ vars) │
-│   /api/*   → Cloudflare Tunnel ──┐  cloudflared dials OUT         │
-└──────────────────────────────────┼────────────────────────────────┘
-                                   │
+┌─ PUBLIC DOOR (NOT BUILT) ─────────────────────────────────────────┐
+│ Cloudflare Tunnel + Access deliberately remain absent             │
+└───────────────────────────────────────────────────────────────────┘
+                                    │
 ┌─ TAILNET DOOR ────────────────┐  │      ┌─ edaserver (RHEL 9) ────────────┐
-│ bench watcher (agnipi)  ─┐    │  │      │ Caddy :443 (tailscale cert)     │
+│ tailnet clients          ─┐    │  │      │ Caddy :443 (tailnet only; TLS) │
 │ cli/vault.py             ├──► Caddy ────┤ 127.0.0.1:8099  vault-api       │
 │ cli/backfill.py          │    │  │      │ 127.0.0.1:8087  nginx-fedbench  │
 │ MCP tools                ┘    │  │      │   ├ :3000 PostgREST            │
@@ -30,13 +28,22 @@ nothing has exercised yet — treat the difference as load-bearing.
                                           └────────────────────────────────┘
 ```
 
-**Inbound ports opened to the internet: none.** `cloudflared` dials out. On the tailnet, Caddy
-is the only listener; PostgREST, the object store and Postgres stay loopback-bound.
+**Inbound ports opened to the internet: none.** The public Cloudflare door is deliberately not
+built. On the tailnet, Caddy is the only tailnet-facing listener; PostgREST, the object store and
+Postgres stay loopback-bound.
+
+**Verified from a separate tailnet device, 2026-09-11:** the live door is
+`https://edaserver.tailcb2a72.ts.net`. Caddy 2.11.4 terminates TLS on :443 and proxies to the
+nginx shim on `127.0.0.1:8087`. It binds **only** `100.87.250.124` and
+`fd7a:115c:a1e0::2032:fa7d`; the install asserts those kernel listening sockets after start,
+rather than trusting the Caddyfile. Without `bind`, Caddy listens on `0.0.0.0:443`, which would
+also publish the data plane on `192.168.51.1`, `10.10.10.2`, and `10.177.7.111` while the document
+still misleadingly called it a tailnet door.
 
 | Door | Reaches | Identity |
 |---|---|---|
-| Public (Cloudflare) | `/api/*` **only** | A Workspace user, or an Access service token |
-| Tailnet (Caddy) | `/api/*`, `/rest/v1/*`, `/storage/v1/object/*` | HS256 service JWT, or `VAULT_API_KEY` |
+| Public (Cloudflare, not built) | Nothing | Not applicable |
+| Tailnet (Caddy) | `/api/*`, `/rest/v1/*`, `/storage/v1/*` | HS256 service JWT |
 
 ### The invariant that keeps this safe
 
@@ -605,11 +612,58 @@ tokens with `tools/mint_service_jwt.py --role {bench_service|vault_service}`.
 **PostgREST must be the x86_64 build.** Every install note in the testbench repo hardcodes
 aarch64, from when the Pi was the target.
 
-**The endpoint is not published yet.** PostgREST 16.3, fed-storage and the nginx shim listen on
-`127.0.0.1:3000`, `127.0.0.1:3001` and `127.0.0.1:8087` respectively; `ss -lnt` verified all
-three are loopback-only. Caddy, the Tailscale certificate and the Cloudflare tunnel are not done.
-When the tailnet endpoint is published, its ACL needs `agnipi -> edaserver:443`, or the bench
-watcher backs off silently rather than reporting the missing path.
+### The tailnet door is live (2026-09-11)
+
+**Verified from a separate device on the tailnet, not from edaserver:**
+`https://edaserver.tailcb2a72.ts.net` terminates TLS in Caddy 2.11.4 on :443 and proxies to the
+nginx shim on `127.0.0.1:8087`. The door is built; it is not loopback-only.
+
+**Caddy binds only the tailnet addresses:** `100.87.250.124` and
+`fd7a:115c:a1e0::2032:fa7d`. The install checks the kernel's listening sockets after start. A
+`bind` directive is essential: without it Caddy listens on `0.0.0.0:443`, publishing the data
+plane on the host's `192.168.51.1`, `10.10.10.2`, and `10.177.7.111` addresses as well. That
+failure reads like a correctly configured tailnet door while exposing it on three other networks.
+
+**Caddy does not bind :80.** Its global `auto_https disable_redirects` setting is required because
+Caddy otherwise opens :80 for HTTP-to-HTTPS redirects. A startup failure then names :80, a port
+the Caddyfile never mentions, and misleadingly reads as a conflict on :443. nginx's stock default
+server does hold `0.0.0.0:80` on this host; that is unrelated to the vault, whose nginx config is
+loopback-only on `127.0.0.1:8087`. Nothing behind this door is acceptable over plain HTTP.
+
+The certificate is a real Let's Encrypt certificate issued by `tailscale cert` through DNS-01,
+with CN `edaserver.tailcb2a72.ts.net`, expiring 2026-12-10. `tailscale-cert.timer` renews it daily
+at 04:40. `https://edaserver` can never have a valid certificate: MagicDNS resolves the short name,
+but does not make it a name a CA will sign.
+
+Routes are deliberately narrow: `/rest/v1/*` and `/storage/v1/*` proxy to `127.0.0.1:8087`;
+`/healthz` and `/api/*` proxy to `127.0.0.1:8099`. `vault-api` is not installed, so the latter two
+currently return 502; that is expected and does not affect the data plane. Everything else returns
+404.
+
+### The curl trap
+
+```
+curl https://edaserver.tailcb2a72.ts.net/rest/v1/kinds
+# 404
+curl https://edaserver.tailcb2a72.ts.net/rest/v1/kinds -H 'Accept-Profile: connect'
+# 401
+```
+
+Both responses are correct. Without `Accept-Profile: connect`, PostgREST uses the default
+`public` profile, the bench schema, where `kinds` does not exist; it returns 404 `PGRST205`, "not
+found in the schema cache". With the header, the request reaches the `connect` schema and is
+refused without a token, returning 401 `42501`. Omitting the header therefore produces a 404 that
+misleadingly looks like a broken endpoint or missing view. With a valid `connect_read` token and
+the header, `connect.kinds` returns 7 rows.
+
+`connect.health` still returns all zeros: the 19 migrations created the schema, but no vault data
+has migrated from hosted Supabase. Use seeded `connect.kinds` as the liveness probe, because a
+probe that cannot fail cannot distinguish a live service from an empty migration.
+
+The public Cloudflare tunnel plus Access door is deliberately **not built**, by decision on
+2026-09-11. The tailnet is an outer factor, not the gate: every path behind this door independently
+validates the HS256 service JWT. Tailnet membership alone grants nothing, because the tailnet has
+other people's devices on it.
 
 ---
 
@@ -767,9 +821,10 @@ the concrete form of the isolate-from-the-EDA-toolchain concern in the `agni-con
 hypothetical about a Postgres cluster, an actual `PATH` collision that would have a migration run
 against whatever client Calibre bundles.
 
-**Ports are clear.** Nothing is listening on 3000, 3001, 8087, 8098, 8099, 443 or 80, and none of
-`postgrest`, `caddy`, `cloudflared`, `nginx`, `node` or `rclone` is installed. `restic` is.
-Phase 0 is a clean install rather than a negotiation with something already running.
+**Before the install, ports were clear.** The pre-install survey found nothing listening on 3000,
+3001, 8087, 8098, 8099, 443 or 80, and none of `postgrest`, `caddy`, `cloudflared`, `nginx`,
+`node` or `rclone` installed. That was why Phase 0 began as a clean install rather than a
+negotiation with something already running; it is not the current listener state.
 
 **Ownership.** The vault-side units run as `fedbackup` from `/srv/fedbackup/ferrodiode-pcb-testbench`,
 mode `0750` and unreadable to anyone else — which is correct, and is why an unprivileged survey
@@ -818,8 +873,9 @@ two statements committed before it failed on the missing `pg_trgm`, leaving sche
 migration the ledger correctly recorded as never applied. `postgresql17-contrib` was missing and is
 now installed.
 
-**What is still not up: anything that speaks HTTP.** PostgREST, `fed_storage`, nginx and Caddy all
-need root to install, so the endpoint is a database today and not yet an endpoint.
+**What was still not up at this point: anything that spoke HTTP.** PostgREST, `fed_storage`, nginx
+and Caddy then needed root to install. That historical status is superseded by the live tailnet
+door in §7; retaining it without the date makes the current endpoint misleadingly appear absent.
 
 ### Unrelated, and live: the bench has been down since 2026-09-10 14:02
 

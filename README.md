@@ -11,10 +11,10 @@ Metadata fields are database rows, so the form, filters, API schema, and CLI sha
 | Layer | Choice |
 |---|---|
 | Web | Vite, React, TypeScript, Tailwind — served by Vercel, holds **no** secret |
-| API | Node on `edaserver`, loopback only, reached through Cloudflare Tunnel |
+| API | Node on `edaserver`, reached through the tailnet door; the public door is not built |
 | Data | PostgreSQL 17 on `edaserver`, schemas `vault` + `public` (the bench), fronted by PostgREST |
 | Objects | `fed_storage`, buckets `vault` and `bench` |
-| Auth | Cloudflare Access with Google Workspace; the assertion is **cryptographically verified**, never trusted as a header |
+| Auth | Service JWTs on every path; Cloudflare Access with Google Workspace is reserved for the unbuilt public door |
 
 The vault and the 128×128 test bench share one cluster: `public` is the bench's schema and is a
 copied wire contract — not to be redesigned or renamed. `docs/UNIFIED_ENDPOINT.md` is the
@@ -24,12 +24,26 @@ operator's document and explains why each piece is shaped the way it is.
 > are restore-verified; `supabase/migrations/0001–0006` remain as the historical record of that
 > deployment. The self-hosted track is `supabase/migrations/selfhost/0100–0118`.
 
-**Data-plane status (2026-09-11).** The data plane is now **LIVE** on `edaserver`: PostgREST,
-`fed_storage`, and the nginx shim are active on loopback, all 19 migrations are applied, and the
-full path was verified end to end with a real token. It is loopback-only because Caddy, the
-Tailscale certificate, and the Cloudflare tunnel are not done, so nothing is reachable from the
-tailnet yet. No vault data has been migrated from hosted Supabase; the tables are empty by design,
-so zero-row health is not evidence of a failed schema migration.
+**Data-plane status (2026-09-11).** The data plane is now **LIVE** at
+`https://edaserver.tailcb2a72.ts.net`, reachable from devices on the tailnet and nowhere else.
+Caddy 2.11.4 terminates the Let's Encrypt certificate issued through `tailscale cert` (DNS-01;
+CN `edaserver.tailcb2a72.ts.net`, expiring 2026-12-10; `tailscale-cert.timer` renews it daily at
+04:40) on `:443` and proxies the data routes to the loopback-only nginx shim at `127.0.0.1:8087`.
+It binds only `100.87.250.124` and `fd7a:115c:a1e0::2032:fa7d`, as asserted from kernel listening
+sockets after start, so the host's other interfaces do not publish the vault. The short name
+`https://edaserver` resolves through MagicDNS but cannot have a valid CA certificate. Caddy does
+not bind `:80`, so this door cannot serve plain HTTP; nginx's unrelated stock `0.0.0.0:80` server
+does not serve the vault.
+
+`/rest/v1/*` and `/storage/v1/*` go to `:8087`; `/healthz` and `/api/*` go to the uninstalled
+`vault-api` at `:8099` and therefore return 502. Anything else returns 404. Test `connect.kinds`
+with `Accept-Profile: connect`: without it, `kinds` is looked up in the default `public` bench
+schema and returns 404, which falsely looks like a missing view; with it, no token returns 401.
+With a valid `connect_read` token and the header, it returns 7 rows. `connect.health` returns all
+zeros because no vault data has been migrated from hosted Supabase; the tables are empty by design,
+not evidence of a failed schema migration. Use seeded `connect.kinds` as the liveness probe because
+a probe that cannot fail proves nothing. The public Cloudflare tunnel and Access door are
+deliberately not built; tailnet membership grants no service authorization.
 
 ## Local development
 
@@ -73,10 +87,10 @@ without a migration, for anyone querying directly.
 
 ## Auth
 
-Cloudflare Access fronts the site with Google Workspace as the IdP. `api/_lib/accessJwt.js`
-**verifies the signature** of `Cf-Access-Jwt-Assertion` against the team's keys and checks `aud` —
-it does not trust a proxy-injected header, which is what makes this safe even if something else
-ever reaches the origin.
+The unbuilt public door would use Cloudflare Access with Google Workspace as the IdP.
+`api/_lib/accessJwt.js` **verifies the signature** of `Cf-Access-Jwt-Assertion` against the team's
+keys and checks `aud` — it does not trust a proxy-injected header, which prevents a forged assertion
+from becoming access if that door is later built.
 
 The policy checks the Google **`hd` claim**, not the email suffix: `hd` is asserted by Google about
 the account's domain and cannot be satisfied by a personal account with a lookalike address.
@@ -96,8 +110,8 @@ the app makes for deletes and audit reads. Humans auto-provision as `member` on 
 
 `docs/DEPLOY_CHECKLIST.md` is the ordered runbook, including the prerequisites that gate a
 cutover. In short: the SPA stays on Vercel (static, no secrets, **nothing** starts with `VITE_`),
-the API moves to `edaserver` behind Cloudflare Tunnel, and **no inbound port is opened** —
-`cloudflared` dials out.
+the data plane is reached through the tailnet door, and the public Cloudflare door remains
+deliberately unbuilt.
 
 Server environment lives in `/etc/vault/vault-api.env`; see `.env.example` for the full list.
 `ANTHROPIC_API_KEY` is optional — without it the search agent returns 503 and everything else

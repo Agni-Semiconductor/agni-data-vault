@@ -8,9 +8,12 @@ measurement data, and the whole of what is promised to you.
 through the HTTP path. `connect_read` reads the seven views and is refused on every base table in
 `vault` and `public`.
 
-**The HTTP listener is LOOPBACK ONLY.** PostgREST, `fed_storage`, and the nginx shim are active,
-but Caddy, the Tailscale certificate, and the Cloudflare tunnel are not done. You cannot reach the
-endpoint from your own machine yet; the URL below works only from an API server on `edaserver`.
+**The data plane is LIVE on the Tailnet** as of 2026-09-11 at
+`https://edaserver.tailcb2a72.ts.net`. Caddy 2.11.4 terminates TLS on `:443` and proxies
+`/rest/v1/*` and `/storage/v1/*` to the loopback-only nginx shim on `127.0.0.1:8087`. Caddy is
+asserted after start to listen only on `100.87.250.124` and `fd7a:115c:a1e0::2032:fa7d`; without
+that bind, it would listen on `0.0.0.0:443` and expose the data plane on the host's other networks.
+The public Cloudflare door is still not built.
 
 ---
 
@@ -46,10 +49,11 @@ are worth having rather than copying:
 SPA and the API are the same origin — Safari blocks it otherwise. Cloudflare fronting one hostname
 with two origins gives the browser one origin while Vercel still serves the SPA.
 
-**Why that is also the security answer.** Your API server on `edaserver` reaches PostgREST over
-**loopback**. The token never crosses a network, and the data plane (`/rest/v1`, `/storage/v1`) is
-never published through a tunnel — only your own `/api` is. What goes public is an application
-endpoint that authenticates every request, not a PostgREST origin holding a database credential.
+**Why that is also the security answer.** Your API server on `edaserver` can reach PostgREST over
+**loopback**. The data plane (`/rest/v1`, `/storage/v1`) is available only on the Tailnet, not
+through a public tunnel; Tailnet membership is an outer factor, not the gate, because every path
+still validates the HS256 service JWT. The Tailnet door therefore does not turn membership into
+access to a PostgREST origin holding a database credential.
 
 **Three rules that are not negotiable, because breaking any one of them is an incident:**
 
@@ -71,21 +75,24 @@ endpoint that authenticates every request, not a PostgREST origin holding a data
 
 | | |
 |---|---|
-| **Base URL** | `http://127.0.0.1:8087/rest/v1` — loopback, from your API server on `edaserver` |
+| **Base URL** | `https://edaserver.tailcb2a72.ts.net/rest/v1` — from a Tailnet device; use the full name because `https://edaserver` can never have a CA-valid certificate |
 | **Profile** | `Accept-Profile: connect` on every GET (`Content-Profile` for writes, which you have none of) |
 | **Auth** | `Authorization: Bearer <jwt>`, HS256, claim `{"role": "connect_read"}` |
 | **Database** | `fedbench` |
 
 ```bash
-curl -s 'http://127.0.0.1:8087/rest/v1/measurements?kind=eq.pund&limit=5' \
+curl -s 'https://edaserver.tailcb2a72.ts.net/rest/v1/measurements?kind=eq.pund&limit=5' \
   -H 'Accept-Profile: connect' \
   -H "Authorization: Bearer $CONNECT_JWT"
 ```
 
 **Forget `Accept-Profile` and you get the bench schema**, because `public` is first in
-`PGRST_DB_SCHEMAS` and is therefore the default profile. You will get a 404 for a table name that
-plainly exists, which reads as "the endpoint is broken" rather than "you asked the wrong schema".
-Set the header in your HTTP client once, centrally.
+`PGRST_DB_SCHEMAS` and is therefore the default profile. For example, an unauthenticated
+`curl https://edaserver.tailcb2a72.ts.net/rest/v1/kinds` returns `404` with `PGRST205`, "not found
+in the schema cache"; with `-H 'Accept-Profile: connect'`, it correctly reaches `connect` and
+returns `401` with `42501` until you provide a token. The 404 reads as "the endpoint is broken" or
+"the view is missing" when you asked the wrong schema. Set the header in your HTTP client once,
+centrally.
 
 ### The token
 
@@ -186,7 +193,7 @@ your application shows an empty database rather than an access failure. A health
 So `connect.health` counts rows *through the views you read*:
 
 ```bash
-curl -s 'http://127.0.0.1:8087/rest/v1/health' \
+curl -s 'https://edaserver.tailcb2a72.ts.net/rest/v1/health' \
   -H 'Accept-Profile: connect' -H "Authorization: Bearer $CONNECT_JWT"
 # {"n_samples":0,"n_measurements":0,"n_files":0,"n_metrics":0,"n_bench_runs":0}
 ```
@@ -197,7 +204,7 @@ Probe `connect.kinds` instead; the migration chain seeds it, and it currently re
 through the full path, so it cannot pass vacuously against an empty database:
 
 ```bash
-curl -s 'http://127.0.0.1:8087/rest/v1/kinds' \
+curl -s 'https://edaserver.tailcb2a72.ts.net/rest/v1/kinds' \
   -H 'Accept-Profile: connect' -H "Authorization: Bearer $CONNECT_JWT"
 # seven rows
 ```
@@ -213,9 +220,10 @@ returns an empty result rather than an error.
 `connect.files` gives you `bucket` + `storage_path` + `sha256`. Those are stable identifiers, not
 URLs — deliberately, so this deployment's hostname never ends up baked into your database.
 
-To fetch an object, go through `fed_storage` on the same loopback origin
-(`/storage/v1/object/<bucket>/<path>`) with a token that has storage rights. If you need that, ask;
-it is a different grant from the one above and it is worth deciding rather than defaulting.
+To fetch an object, go through `fed_storage` at the same Tailnet origin
+(`https://edaserver.tailcb2a72.ts.net/storage/v1/object/<bucket>/<path>`) with a token that has
+storage rights. If you need that, ask; it is a different grant from the one above and it is worth
+deciding rather than defaulting.
 
 Two buckets exist. `bench` holds the testbench's own captures and is **read-only to everyone
 outside the bench** — an unused delete on the system of record turns a path-confinement bug from a
@@ -227,10 +235,19 @@ disclosure into data loss, so the absence is enforced rather than incidental.
 
 Honest status, so you can plan around it:
 
-- **The endpoint is not reachable from your machine yet.** PostgREST 16.3 is on `127.0.0.1:3000`,
-  `fed_storage` is on `127.0.0.1:3001`, and the nginx shim is on `127.0.0.1:8087`; all are
-  loopback-only. Caddy, the Tailscale certificate, and the Cloudflare tunnel are not done, so there
-  is no published path to the endpoint yet.
+- **The endpoint is not reachable from outside the Tailnet.** Caddy 2.11.4 terminates the real
+  Let's Encrypt certificate for `edaserver.tailcb2a72.ts.net` on `:443` and routes `/rest/v1/*` and
+  `/storage/v1/*` to the loopback-only nginx shim on `127.0.0.1:8087`. It does not bind `:80`, so
+  nothing at this door accepts plain HTTP. nginx's stock default server separately holds
+  `0.0.0.0:80`; that is unrelated to the vault. The public Cloudflare tunnel plus Access door is
+  deliberately not built, so a device outside the Tailnet has no route rather than an unauthenticated
+  fallback. The certificate is renewed daily by `tailscale-cert.timer` at 04:40 and expires
+  2026-12-10; use the full name, because MagicDNS resolving `edaserver` does not make that short
+  name eligible for a valid certificate.
+- **`/healthz` and `/api/*` are not working application endpoints yet.** Caddy routes them to
+  `127.0.0.1:8099` for `vault-api`, which is not installed, so they return `502`. That is expected
+  and does not affect the data plane; treating it as a failure of `/rest/v1/*` or `/storage/v1/*`
+  would misdiagnose an absent service as a broken measurement endpoint.
 - **Your own database is not provisioned.** One cluster, a database per product — so agni-connect's
   own tables get their own database on the same cluster. Note that **PostgREST serves exactly one
   database**, so the instance you read `connect` from cannot also serve your tables. Either run your

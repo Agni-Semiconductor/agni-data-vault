@@ -26,9 +26,9 @@ steps below depend on one line of it. **Nothing outside this block is marked ver
   client. That one gets a section to itself.
 - `postgresql17-contrib` was missing and **has just been installed**. `pg_trgm` and `citext` live in
   it, and their absence has already stopped this migration chain once on this box.
-- Nothing is listening on 3000, 3001, 8087, 8098, 8099, 443 or 80, and none of `postgrest`, `caddy`,
-  `cloudflared`, `nginx`, `node` or `rclone` is installed. `restic` is. **This is a clean install
-  rather than a negotiation with something already running.**
+- Caddy 2.11.4 is listening on `:443` for the tailnet door; nginx's stock default server still holds
+  `0.0.0.0:80`. The vault nginx shim remains loopback-only on `127.0.0.1:8087`. **This is a clean
+  install rather than a negotiation with something already running.**
 - Accounts: `fedbackup` runs the existing archive units out of
   `/srv/fedbackup/ferrodiode-pcb-testbench`, mode `0750` and unreadable to anyone else. `agnidata`
   is the new deployment account — login, **no sudo**. `vaultsvc` is the new nologin service account
@@ -292,9 +292,9 @@ which reads as **the archive is corrupt** rather than **the secret is wrong**.
 ## 5. The data plane: PostgREST, `fed_storage`, the nginx shim
 
 PostgREST 16.3 listens on `127.0.0.1:3000`, `fed_storage` on `127.0.0.1:3001`, and the nginx shim
-on `127.0.0.1:8087`; `ss -lnt` verifies that all three are loopback only. Caddy, the Tailscale
-certificate and the Cloudflare tunnel are not configured yet, so nothing is reachable from the
-tailnet.
+on `127.0.0.1:8087`; `ss -lnt` verifies that all three are loopback only. Caddy 2.11.4 is the
+tailnet-only listener on `:443`; the Cloudflare tunnel is not configured, so the public door remains
+absent.
 
 **Take the x86_64 PostgREST build.** Every install note in the testbench repo hardcodes aarch64.
 
@@ -399,63 +399,68 @@ and never again, which looks like it worked:
 
 ---
 
-## 6. The tailnet door: Caddy, and a certificate that expires in 90 days
+## 6. The tailnet door: live 2026-09-11
 
-Caddy is not installed. On the tailnet it is the only listener; PostgREST, the object store and
-Postgres all stay loopback-bound.
+The tailnet door is live at **`https://edaserver.tailcb2a72.ts.net`**. Caddy 2.11.4 terminates TLS
+on `:443` and proxies to the nginx shim at `127.0.0.1:8087`; PostgREST, the object store and
+Postgres remain loopback-bound. The install was `deploy/caddy-install.sh`: run
+`sudo bash deploy/caddy-install.sh --check` first because it changes nothing, then run it without
+`--check`. Caddy came from the `@caddy/caddy` COPR.
 
-Fill the placeholders in `deploy/Caddyfile` — `<tailnet>`, `<tailscale_cert_path>`,
-`<tailscale_key_path>` — then:
+The two prerequisites below are part of the install, not optional troubleshooting:
+
+- **Enable HTTPS Certificates for the tailnet in the Tailscale admin console.** Without it,
+  `tailscale cert` fails with a message naming the DOMAIN. That symptom reads as a DNS problem, but
+  the missing prerequisite is the console setting.
+- **Keep the renewal executable at a `bin_t` path.** The committed unit pointed into a service
+  account's home, which is `user_home_t`; systemd cannot execute it and reports
+  `Failed to locate executable: Permission denied`, which reads as a missing file. The installer
+  places it at `/usr/local/bin/tailscale-cert-renew.sh`, a `bin_t` path, before installing the unit.
+
+`tailscale cert` issued the real Let's Encrypt certificate through DNS-01: CN
+`edaserver.tailcb2a72.ts.net`, expiring **2026-12-10**. The short name `https://edaserver` can never
+have a valid certificate: MagicDNS resolves it, but does not make it a name a CA will sign. Caddy
+uses the explicit certificate files and does not watch them, so `tailscale-cert.timer`, rather than
+a hand-run renewal, runs the service daily at **04:40** and reloads Caddy when the certificate bytes
+change. A path mismatch would write the renewal where Caddy is not looking, which reads as a renewal
+that worked until the old certificate expires.
+
+The Caddy bind was verified against the kernel's listening sockets after start, not only against the
+configuration: `:443` is bound only to `100.87.250.124` and
+`fd7a:115c:a1e0::2032:fa7d`. Without the bind directive Caddy listens on `0.0.0.0:443`, publishing
+the data plane on the host's `192.168.51.1`, `10.10.10.2` and `10.177.7.111` interfaces. Caddy does
+**not** bind `:80` because global `auto_https disable_redirects` is set; nginx's stock default
+server does hold `0.0.0.0:80`, which is unrelated to this loopback-only vault shim.
+
+Routes are exact: `/rest/v1/*` and `/storage/v1/*` go to `127.0.0.1:8087`; `/healthz` and `/api/*`
+go to `127.0.0.1:8099`. `vault-api` is not installed, so those last two routes currently return
+502 as expected; the data plane does not depend on it. Anything else returns 404.
+
+### Verify the live door from a separate tailnet device
+
+The profile header is not decoration. Without it, PostgREST uses the default `public` profile, which
+is the bench schema and has no `kinds` table; with it, the request reaches `connect` and requires a
+token. Omitting the header therefore produces a misleading 404 rather than proving the endpoint is
+broken:
 
 ```bash
-tailscale cert --cert-file /etc/caddy/certs/edaserver.crt \
-               --key-file  /etc/caddy/certs/edaserver.key  edaserver.<tailnet>.ts.net
-sudo semanage fcontext -a -t etc_t '/etc/caddy/certs(/.*)?'
-sudo restorecon -Rv /etc/caddy/certs
+curl https://edaserver.tailcb2a72.ts.net/rest/v1/kinds
+# 404, error=PGRST205: not found in the schema cache
+
+curl https://edaserver.tailcb2a72.ts.net/rest/v1/kinds -H 'Accept-Profile: connect'
+# 401, error=42501: no token
 ```
 
-The context step is not optional: **a certificate Caddy cannot read fails exactly like a certificate
-that does not exist**, while everything on disk says the file is there.
+Both responses are correct. With a valid `connect_read` token and the header, `connect.kinds`
+returns **7 rows**. `connect.health` still returns all zeros: the 19 migrations built the schema,
+but no vault data has been migrated from hosted Supabase, so use seeded `connect.kinds` as the
+liveness probe. A probe that cannot fail is not a probe.
 
-### The renewal is two halves, and people ship one
-
-`tailscale cert` issues a real Let's Encrypt certificate over DNS-01, valid **~90 days**, and nothing
-renews it on its own. `deploy/Caddyfile` pins the files with an explicit `tls <cert> <key>`, which
-**Caddy reads at config load and does not watch**. So the renewal *and* the reload are both required,
-and either one missing produces the same outage three months after go-live — far enough from any
-deploy that nobody connects it to its cause.
-
-```bash
-sudo cp deploy/tailscale-cert.service deploy/tailscale-cert.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl start tailscale-cert.service      # prove it works BEFORE trusting the timer
-sudo systemctl enable --now tailscale-cert.timer
-```
-
-Enable the **timer**, not the service, and run the service once by hand first: a timer whose unit has
-never succeeded is a renewal you have assumed rather than observed. `fedbench-verify` in the block at
-the top of this file is precisely that mistake, sitting enabled and never once started.
-
-`/etc/vault/tailscale-cert.env` (root:root, `0640`) carries `TAILSCALE_CERT_DOMAIN`,
-`TAILSCALE_CERT_PATH` and `TAILSCALE_KEY_PATH`. **Those paths appear twice — here and in the
-Caddyfile — and must be identical.** A mismatch writes the renewed certificate somewhere Caddy is not
-looking, which reads as a renewal that worked right up until the door stops serving TLS.
-
-The renewal script reloads Caddy **only when the certificate bytes change**, because `tailscale cert`
-is idempotent and returns the existing certificate until it is near expiry; an unconditional reload
-would drop Caddy's config every day to install a file identical to the one already loaded. It reloads
-rather than restarts, because the bench watcher's uploads are the requests most likely to be in
-flight.
-
-Set `OnFailure=` in `tailscale-cert.service` to something that reaches a human. **A failed renewal is
-silent for weeks and then total:** the bench watcher reads a TLS error as unreachable and backs off
-quietly, so the first symptom is sync lag nobody is watching.
-
-**The short name `https://edaserver` can never have a valid certificate.** MagicDNS resolves the
-name; nothing issues a certificate for it. Use the full `.ts.net` name everywhere. Those names are
-publicly resolvable and appear in Certificate Transparency logs — not routable from outside the
-tailnet, but the hostname is public knowledge, which is why every path behind this door
-authenticates rather than relying on the name being unguessable.
+The tailnet is an outer factor, not the gate: every path behind this door independently validates the
+HS256 service JWT, and tailnet membership grants nothing on its own. The public door (Cloudflare
+tunnel plus Access) was deliberately **not** built on 2026-09-11, and the vault API was deliberately
+not installed; those are unchanged, so the expected 502s and tailnet-only scope are not deployment
+failures.
 
 Two things in the Caddyfile not to tidy:
 

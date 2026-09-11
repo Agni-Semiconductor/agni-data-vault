@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "preview": "vite preview",
+    "check:integration": "node scripts/integration-check.mjs",
     "check:api": "node --check api/handler.js && node --input-type=module -e \"await import('./api/handler.js')\""
   },
   "dependencies": {

@@ -20,9 +20,17 @@
 //   * do the views (figure_sources, device_history, device_verdict_changes) come back through
 //     PostgREST at all, and with `security_invoker` under the vault_service role?
 //   * do the resources' column allow-lists match the real tables?
-process.env.VAULT_REST_URL = 'http://127.0.0.1:3011';
-process.env.VAULT_STORAGE_URL = 'http://127.0.0.1:3011';
-process.env.VAULT_SERVICE_JWT = process.env.JWT;
+// Take the environment as given, with a local default for the URL only. The first installed
+// version hardcoded `VAULT_SERVICE_JWT = process.env.JWT`, carried over from the scratch file it
+// grew out of -- so running it the documented way silently sent an EMPTY token and PostgREST
+// answered "Expected 3 parts; got 1", which reads as a corrupt token rather than an absent one.
+process.env.VAULT_REST_URL ||= 'http://127.0.0.1:3011';
+process.env.VAULT_STORAGE_URL ||= process.env.VAULT_REST_URL;
+if (!process.env.VAULT_SERVICE_JWT) {
+  console.error('VAULT_SERVICE_JWT is not set. Mint one with the same secret PostgREST was started with:');
+  console.error('  cd ../ferrodiode-pcb-testbench && FED_PGRST_JWT_SECRET=<secret> python tools/mint_service_jwt.py --role vault_service');
+  process.exit(2);
+}
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = '') => { if (cond) { pass++; console.log(`  PASS  ${name}`); } else { fail++; console.log(`  FAIL  ${name}${detail ? '\n          ' + detail : ''}`); } };

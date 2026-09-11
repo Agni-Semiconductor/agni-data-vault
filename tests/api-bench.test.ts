@@ -10,7 +10,13 @@ const OK = { data: [], error: null, count: 0 };
 function fakeSb(results) {
   const queue = results.slice(), calls = [];
   const scoped = { from: (table) => { const result = queue.length ? queue.shift() : OK, ops = [], q = {}; calls.push({ table, ops }); for (const method of ['select', 'eq', 'gte', 'lte', 'order', 'range', 'limit', 'maybeSingle']) q[method] = (...args) => { ops.push([method, ...args]); return q; }; q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject); return q; } };
-  return { calls, schema: vi.fn((name) => { expect(name).toBe('public'); return scoped; }) };
+  // The client exposes BOTH shapes because bench.js legitimately uses both: `.schema('public')`
+  // for every bench table, and the bare default (which supabaseAdmin already scopes to `vault`)
+  // for board_pin_map, the vault's own. Modelling only the first is what let a real
+  // `public.board_pin_map does not exist` reach the integration check -- a mock that answers by
+  // table name without caring which schema was asked for cannot catch that class of bug, so the
+  // least it can do is not hide which schema was used.
+  return { ...scoped, calls, schema: vi.fn((name) => { expect(name).toBe('public'); return scoped; }) };
 }
 
 beforeEach(() => { state.sb = fakeSb([]); state.getObject = vi.fn(); });

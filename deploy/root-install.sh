@@ -596,6 +596,78 @@ echo "  curl -s localhost:8087/rest/v1/health -H 'Accept-Profile: connect' -H \"
 echo "  -> n_samples must be a REAL NUMBER. Zero here means a role lost BYPASSRLS and the"
 echo "     database looks empty rather than unauthorised."
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+step "8. The data plane, end to end, with a real token"
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# Step 7's 200 proves nginx can reach PostgREST. It proves nothing about whether a request
+# carrying a token gets ROWS, and that is the failure this box is most likely to have: every vault
+# table has RLS enabled with no policies, so a grant or ownership mistake returns [] from
+# everything while every status code stays 200. An empty database and an unauthorised one are
+# indistinguishable from outside.
+#
+# So this reads connect.kinds, which the migration chain SEEDS -- never legitimately empty, which
+# is what makes it a usable probe. connect.samples is deliberately NOT used: no vault data has
+# been migrated yet, so zero there is correct, and a check that cannot fail is not a check.
+SEC=$(grep -m1 '^PGRST_JWT_SECRET=' "$SECRETS" | cut -d= -f2- | tr -d '"')
+if [ -z "$SEC" ]; then
+  bad "no PGRST_JWT_SECRET in $SECRETS -- cannot mint a probe token"
+else
+  TOKFILE=$(mktemp); chmod 600 "$TOKFILE"
+  # Minted here rather than with tools/mint_service_jwt.py: that lives in the checkout and needs
+  # PyJWT, which this venv has no reason to carry. HS256 is an HMAC over two base64url segments.
+  # Five-minute expiry, written to a 0600 file rather than passed as an argument, so the token
+  # never appears in `ps`.
+  SECRET="$SEC" "$SRCPY" - "$TOKFILE" <<'PYEOF' 2>/dev/null
+import base64, hashlib, hmac, json, os, sys, time
+b = lambda d: base64.urlsafe_b64encode(d).rstrip(b"=")
+hdr = json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()
+pay = json.dumps({"role": "connect_read", "exp": int(time.time()) + 300}, separators=(",", ":")).encode()
+msg = b(hdr) + b"." + b(pay)
+sig = b(hmac.new(os.environ["SECRET"].encode(), msg, hashlib.sha256).digest())
+with open(sys.argv[1], "w") as f:
+    f.write("Authorization: Bearer " + (msg + b"." + sig).decode())
+PYEOF
+  unset SEC
+
+  if [ -s "$TOKFILE" ]; then
+    ok "minted a 5-minute connect_read token (not printed)"
+    body=$(curl -sS -H "@$TOKFILE" -H 'Accept-Profile: connect' \
+             "http://127.0.0.1:8087/rest/v1/kinds?select=kind" 2>/dev/null)
+    n=$(printf '%s' "$body" | grep -o '"kind"' | wc -l)
+    if [ "${n:-0}" -ge 1 ]; then
+      ok "connect.kinds returned $n row(s) through nginx -> PostgREST -> Postgres"
+    else
+      bad "connect.kinds returned no rows -- this is the grant/BYPASSRLS failure, not an empty database"
+      printf '      %s\n' "$(printf '%s' "$body" | head -c 300)"
+    fi
+
+    # Health is REPORTED, not asserted on counts: zero samples is correct until the vault data is
+    # migrated. What matters here is that it answers at all.
+    h=$(curl -sS -H "@$TOKFILE" -H 'Accept-Profile: connect' \
+          "http://127.0.0.1:8087/rest/v1/health" 2>/dev/null | head -c 300)
+    printf '  \033[36mhealth\033[0m  %s\n' "$h"
+    echo "          n_samples 0 is EXPECTED -- no vault data has been migrated yet."
+  else
+    bad "could not mint a probe token"
+  fi
+  rm -f "$TOKFILE"
+
+  # Fails closed? An unauthenticated request must be refused, not quietly served as the anon role.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept-Profile: connect' \
+           "http://127.0.0.1:8087/rest/v1/kinds" 2>/dev/null)
+  [ "$code" = 401 ] && ok "no token -> 401 (fails closed)" \
+    || bad "no token -> $code, expected 401 -- an unauthenticated reader can reach the data"
+fi
+
+# fed_storage answers on its own port. nginx maps /storage/v1/ WITHOUT stripping the prefix, so
+# its /health is not reachable through the shim -- ask it directly.
+sh=$(curl -sS --max-time 5 "http://127.0.0.1:3001/health" 2>/dev/null | head -c 200)
+case "$sh" in
+  *'"ok":true'*|*'"ok": true'*) ok "fed-storage health: $sh" ;;
+  "")                           bad "fed-storage did not answer on 127.0.0.1:3001" ;;
+  *)                            bad "fed-storage health: $sh" ;;
+esac
+
 printf '\n\033[1mTo undo everything:\033[0m\n'
 cat <<'UNDO'
   systemctl disable --now fed-postgrest fed-storage nginx

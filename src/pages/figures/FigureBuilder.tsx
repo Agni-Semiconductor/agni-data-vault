@@ -3,12 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Badge, Button, Input, Select, Spinner } from '../../components/ui'
 import { FigurePanel } from '../../plot/FigurePanel'
+import { downloadSvg, figureToSvg, type SvgPanel } from '../../plot/exportSvg'
 import { detectKind, type PlotKind } from '../../plot/plotProfiles'
 import { resolvePanel, type TraceInput } from '../../plot/resolveTraces'
 import { parseInWorker } from '../../plot/useParsedFile'
 import type { ParsedFile } from '../../plot/parseFile'
 import { useKinds } from '../../fields/useKinds'
 import { filenameFrom } from '../../lib/contentDisposition'
+import { safeFilename } from '../../plot/exportPng'
 import { createFigure, deleteFigure, getFigure, updateFigure, type Figure, type FigureSource, type FigureSpec, type PanelSpec, type TraceSpec } from '../../lib/figures'
 
 const TRANSFORMS = ['abs', 'log10', 'normalize'] as const
@@ -90,6 +92,26 @@ export default function FigureBuilder() {
   // panel and read as a plotting bug. Showing "3 of 4 resolved" is the whole reason the view
   // exists, so a saved figure never quietly draws less than it claims.
   const unresolved = (query.data?.sources ?? []).filter((source: FigureSource) => !source.source_exists)
+  // Resolved ONCE, and the export reads the same array the screen does. Re-resolving for the
+  // export is the obvious alternative and it is how the exported figure ends up drawing a
+  // different set of traces than the one the author approved -- a second resolution can pick up
+  // a source that finished loading in between, or miss one that failed.
+  const resolvedPanels = useMemo(() => draft.spec.panels.map((panel) => {
+    const inputs: TraceInput[] = (panel.traces ?? []).flatMap((spec) => { const source = spec.src?.file_id ? sources[spec.src.file_id] : undefined; return source?.parsed && source.kind ? [{ spec, parsed: source.parsed, kind: source.kind }] : [] })
+    const loading = (panel.traces ?? []).some((spec) => spec.src?.file_id && sources[spec.src.file_id]?.loading)
+    const failed = (panel.traces ?? []).flatMap((spec, at) => { const source = spec.src?.file_id ? sources[spec.src.file_id] : undefined; return source?.error ? [{ label: spec.label ?? `trace ${at + 1}`, reason: source.error }] : [] })
+    const resolved = resolvePanel(inputs, { unit: panel.unit ?? null, y_scale: panel.y_scale }, registry)
+    // A source that would not LOAD is shown next to a trace that was REFUSED on units. They are
+    // different problems with the same symptom -- an absent curve -- so they must not be
+    // collapsed into one message.
+    return { loading, panel: { ...resolved, refusals: [...resolved.refusals, ...failed] } }
+  }), [draft.spec.panels, registry, sources])
+
+  const exportSvg = useCallback(() => {
+    const panels: SvgPanel[] = resolvedPanels.map((entry, index) => ({ panel: entry.panel, title: `Panel ${index + 1}` }))
+    const svg = figureToSvg(panels, { title: draft.title || 'Figure', subtitle: draft.description || new Date().toISOString().slice(0, 10), layout: draft.spec.layout })
+    downloadSvg(svg, `${safeFilename(draft.title || 'figure')}.svg`)
+  }, [draft.description, draft.spec.layout, draft.title, resolvedPanels])
 
   if (!isNew && query.isLoading) return <div className="flex justify-center py-16"><Spinner /></div>
   if (!isNew && query.error) return <p className="text-sm text-[#B3261E]">{(query.error as Error).message}</p>
@@ -104,6 +126,11 @@ export default function FigureBuilder() {
         {dirty && <Badge tone="amber">unsaved</Badge>}
         <Button onClick={() => save.mutate()} disabled={!draft.title.trim() || save.isPending}>{save.isPending ? 'Saving…' : isNew ? 'Create figure' : 'Save'}</Button>
         {!isNew && <Button variant="ghost" onClick={() => { if (window.confirm('Delete this figure? Anyone holding its link will lose it.')) remove.mutate() }}>Delete</Button>}
+        {/* Vector, rendered from the SAME resolved panels the screen is drawing -- not a
+            second pass over the source files, which could quietly export a different
+            figure than the one on screen. Disabled while any source is still loading,
+            because a half-loaded figure exports as a real file with traces missing. */}
+        <Button variant="ghost" onClick={exportSvg} disabled={resolvedPanels.some((entry) => entry.loading)} title="Vector export, drawn from the resolved traces on screen">Export SVG</Button>
       </div>
     </div>
     <label className="block"><span className="label-caps mb-1 block">Description</span><Input value={draft.description} onChange={(event) => { setDirty(true); setDraft((c) => ({ ...c, description: event.target.value })) }} className="w-full max-w-2xl" /></label>
@@ -116,14 +143,7 @@ export default function FigureBuilder() {
 
     <div className="space-y-8">
       {draft.spec.panels.map((panel, panelIndex) => {
-        const inputs: TraceInput[] = (panel.traces ?? []).flatMap((spec) => { const source = spec.src?.file_id ? sources[spec.src.file_id] : undefined; return source?.parsed && source.kind ? [{ spec, parsed: source.parsed, kind: source.kind }] : [] })
-        const loading = (panel.traces ?? []).some((spec) => spec.src?.file_id && sources[spec.src.file_id]?.loading)
-        const failed = (panel.traces ?? []).flatMap((spec, at) => { const source = spec.src?.file_id ? sources[spec.src.file_id] : undefined; return source?.error ? [{ label: spec.label ?? `trace ${at + 1}`, reason: source.error }] : [] })
-        const resolved = resolvePanel(inputs, { unit: panel.unit ?? null, y_scale: panel.y_scale }, registry)
-        // A source that would not LOAD is shown next to a trace that was REFUSED on units. They
-        // are different problems with the same symptom -- an absent curve -- so they must not be
-        // collapsed into one message.
-        const withFailures = { ...resolved, refusals: [...resolved.refusals, ...failed] }
+        const { loading, panel: withFailures } = resolvedPanels[panelIndex]
         return <section key={panelIndex} className="space-y-3">
           <div className="flex flex-wrap items-end gap-3">
             <span className="label-caps">Panel {panelIndex + 1}</span>

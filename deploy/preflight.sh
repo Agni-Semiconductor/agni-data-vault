@@ -14,6 +14,11 @@
 #   bash preflight.sh > pre.txt  # and send it back
 #
 # Most of this works unprivileged. The few root-only checks say so instead of failing.
+# IT DOES NOT LOOK AT EDA WORK. This box is somebody's EDA machine first. Nothing here reads,
+# lists or walks a path outside the fixed list in section 2, and nothing recurses into a directory
+# it was not told about by name. An earlier version ran `du -sh /srv`, which walks every
+# subdirectory of /srv including whatever else lives there -- exactly the kind of incidental reach
+# that is easy to write and hard to notice. It is gone.
 set -u
 
 hr() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
@@ -46,9 +51,14 @@ echo
 note "mount options for anything holding data (noquota is noted in the archive runbook):"
 mount | grep -E '/srv|/var/lib/pgsql|/data|/mnt' 2>/dev/null | sed 's/^/    /' || note "  (none of the usual paths are separate mounts)"
 echo
-for d in /srv /srv/nextcloud/fedbench /srv/nextcloud/fedbench/objects /var/lib/pgsql /srv/agni-devops; do
+# NAMED paths only, and du is scoped to each rather than to its parent -- /srv itself is
+# deliberately NOT walked, because whatever else lives there is not this project's business.
+# df and lsblk above read the filesystem table rather than the files, which is why they carry
+# most of this section.
+note "sizes of the paths this project owns (named explicitly, never a parent):"
+for d in /srv/nextcloud/fedbench /srv/nextcloud/fedbench/objects /var/lib/pgsql /srv/vault /srv/agni-devops; do
   if [ -e "$d" ]; then
-    printf '  %-38s %s\n' "$d" "$(du -sh "$d" 2>/dev/null | cut -f1 || echo '(unreadable)')"
+    printf '  %-38s %s\n' "$d" "$(du -sh --one-file-system "$d" 2>/dev/null | cut -f1 || echo '(unreadable)')"
   else
     printf '  %-38s %s\n' "$d" "absent"
   fi
@@ -86,6 +96,8 @@ note "certificate: a tailnet cert is Let's Encrypt via DNS-01, ~90 days, and not
 ls -l /etc/caddy/certs 2>/dev/null | sed 's/^/    /' || note "    (no /etc/caddy/certs yet)"
 
 hr "6. What is already installed of the stack"
+# `command -v` consults PATH; it does not search the disk. Nothing here goes looking for EDA
+# tooling, and an absent tool is reported absent rather than hunted for.
 for b in postgrest caddy cloudflared nginx node python3 restic rclone; do
   p="$(command -v "$b" 2>/dev/null || true)"
   printf '  %-12s %s\n' "$b" "${p:-absent}"

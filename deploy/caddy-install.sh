@@ -233,7 +233,20 @@ step "6b. The access log, owned by the user that writes it"
 # and it was created by the validation step three lines earlier. Scoping the umask above stops it
 # being 0600, but not root-owned -- validate runs as root either way. So the file is created and
 # chowned explicitly here rather than left to whichever process touches it first.
-LOGFILE=$(sed -n 's/^[[:space:]]*output file[[:space:]]*\(.*\)$//p' /etc/caddy/Caddyfile | head -1)
+# awk on fields, NOT a sed backreference. The sed version of this line was written through two
+# layers of quoting and arrived with its backreference turned into a literal 0x01 byte, so
+# LOGFILE held a control character: non-empty, so the guard below passed; `dirname` returned
+# "."; and the step created and chowned a file named <0x01> in the current directory and then
+# reported success. An extraction that cannot silently produce a plausible-looking wrong answer
+# beats a clever one.
+LOGFILE=$(awk '$1 == "output" && $2 == "file" { print $3; exit }' /etc/caddy/Caddyfile)
+# Absolute, or treated as absent. A relative path resolves against whatever directory the
+# process happens to be in, which is not something to leave to chance for a file about to be
+# created and chowned.
+case "$LOGFILE" in
+  /*|"") : ;;
+  *)     warn "log path '$LOGFILE' is not absolute -- ignoring it"; LOGFILE="" ;;
+esac
 if [ -n "$LOGFILE" ]; then
   install -d -m 0755 -o "$grp" -g "$grp" "$(dirname "$LOGFILE")"
   [ -e "$LOGFILE" ] || : > "$LOGFILE"

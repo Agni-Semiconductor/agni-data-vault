@@ -528,8 +528,7 @@ for s in fed-postgrest fed-storage nginx; do
     # load) and leaves the cause to `ausearch`. Running it here means nobody has to remember to.
     denials=$(ausearch -m avc -ts recent 2>/dev/null | grep -c 'denied' || true)
     if [ "${denials:-0}" -gt 0 ]; then
-      printf '      [33m%s SELinux denial(s) in the last few minutes:[0m
-' "$denials"
+      printf '      \033[33m%s SELinux denial(s) in the last few minutes:\033[0m\n' "$denials"
       ausearch -m avc -ts recent 2>/dev/null | grep 'denied' | tail -4 | sed 's/^/        /'
     fi
   fi

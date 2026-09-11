@@ -128,6 +128,34 @@ describe('deploy scripts carry no character that fails as something else', () =>
     expect(offenders, 'CRLF breaks bash on `do` and makes systemd exec a name ending in a CR').toEqual([])
   })
 
+  it('no stray control bytes in any deploy script', () => {
+    // The third member of this family, and the most deniable. A line in caddy-install.sh was
+    // written through two layers of quoting and arrived with its sed backreference turned into a
+    // literal 0x01 byte. The script then read a control character into a variable that was
+    // supposed to hold a path: non-empty, so the guard passed; `dirname` returned "."; and the
+    // step created and chowned a file named <0x01> in the current directory and printed `ok`.
+    //
+    // Nothing about that is visible. The line looks like `s/.../​/p` with an empty replacement, in
+    // an editor, in a diff, and in `grep`. Only the bytes say otherwise.
+    const allowed = new Set([9, 10, 13]) // tab, newline, CR (CR has its own assertion above)
+    const offenders = files.flatMap((p) => {
+      const bytes = readFileSync(p)
+      const found = new Set<number>()
+      for (const b of bytes) if (b < 32 && !allowed.has(b)) found.add(b)
+      return found.size ? [`${show(p)}: ${[...found].map((b) => '0x' + b.toString(16).padStart(2, '0')).join(', ')}`] : []
+    })
+    expect(offenders, 'a control byte in a script is invisible in an editor, a diff and a grep').toEqual([])
+  })
+
+  it('the control-byte detector still fires', () => {
+    // Pinned against the real byte that caused it, so a narrowing cannot quietly exempt it.
+    const withSoh = Buffer.from([0x73, 0x2f, 0x78, 0x2f, 0x01, 0x2f, 0x70])
+    const found = [...withSoh].some((b) => b < 32 && ![9, 10, 13].includes(b))
+    expect(found, '0x01 must be caught').toBe(true)
+    const clean = Buffer.from('s/x/\\1/p\n\tindented\n', 'utf8')
+    expect([...clean].some((b) => b < 32 && ![9, 10, 13].includes(b)), 'tabs and newlines are fine').toBe(false)
+  })
+
   it('no bash-interpreted literal backslash-n in any deploy script', () => {
     const offenders = shellScripts.flatMap((p) =>
       unquotedBackslashN(readFileSync(p, 'utf8')).map((line) => `${show(p)}: ${line.trim().slice(0, 110)}`),

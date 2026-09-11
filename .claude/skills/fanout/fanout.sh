@@ -109,33 +109,32 @@ run_one() {
   # Give the worker a toolchain. A bare worktree has no node_modules, so a
   # worker there cannot run tsc, eslint, prettier or vitest and writes blind --
   # every type error it could have caught itself lands on the reviewer instead.
-  # pnpm's content-addressable store makes this a hardlink pass: measured at
-  # 6 s for this monorepo. --offline first, so a worker never reaches the
-  # network for a package the lockfile already resolved; fall back to
-  # --prefer-offline only if the store is missing something.
-  # VENDORED COPY -- diverges from agni-connect's original by this block only.
-  # Which package manager depends on the repo's lockfile, NOT on this script's
-  # habits. agni-connect is pnpm; agni-data-vault is npm (package-lock.json, and
-  # it must stay that way -- a stray pnpm-lock.yaml would flip Vercel's build
-  # detection in production). Guessing wrong is NOT a loud failure: the install
-  # errors into a log nobody reads and the worker then writes blind, which is
-  # exactly what the comment above says this step exists to prevent.
+  #
+  # THE PACKAGE MANAGER IS DETECTED, not assumed. The original hardcoded pnpm,
+  # which is right for agni-connect and wrong here: this repo has only
+  # package-lock.json, so `pnpm install --frozen-lockfile` fails, the fallback
+  # fails too, and the run continues with a warning on stderr that is easy to
+  # miss -- delivering exactly the blind worker the comment above says not to.
+  #
+  # --offline first so a worker never reaches the network for a package the
+  # lockfile already resolved. Note `xlsx` resolves to a CDN tarball
+  # (cdn.sheetjs.com), which a cold store cannot satisfy offline; the
+  # prefer-offline fallback is what covers it.
   if [ -f "$wt/pnpm-lock.yaml" ]; then
-    if ! (cd "$wt" && pnpm install --frozen-lockfile --offline --silent) \
-         >"$log.install.log" 2>&1; then
-      (cd "$wt" && pnpm install --frozen-lockfile --prefer-offline --silent) \
-        >>"$log.install.log" 2>&1 \
-        || echo "fanout: install failed for '$id'; see $log.install.log" >&2
-    fi
+    pm_try=(pnpm install --frozen-lockfile --offline --silent)
+    pm_fallback=(pnpm install --frozen-lockfile --prefer-offline --silent)
   elif [ -f "$wt/package-lock.json" ]; then
-    if ! (cd "$wt" && npm ci --offline --no-audit --no-fund --silent) \
-         >"$log.install.log" 2>&1; then
-      (cd "$wt" && npm ci --prefer-offline --no-audit --no-fund --silent) \
-        >>"$log.install.log" 2>&1 \
-        || echo "fanout: install failed for '$id'; see $log.install.log" >&2
-    fi
-  elif [ -f "$wt/package.json" ]; then
-    echo "fanout: '$id' has package.json but no lockfile; worker has no toolchain" >&2
+    pm_try=(npm ci --prefer-offline --no-audit --no-fund --silent)
+    pm_fallback=(npm ci --no-audit --no-fund --silent)
+  elif [ -f "$wt/yarn.lock" ]; then
+    pm_try=(yarn install --frozen-lockfile --silent)
+    pm_fallback=(yarn install --silent)
+  else
+    pm_try=(true); pm_fallback=(true)
+  fi
+  if ! (cd "$wt" && "${pm_try[@]}") >"$log.install.log" 2>&1; then
+    (cd "$wt" && "${pm_fallback[@]}") >>"$log.install.log" 2>&1 \
+      || echo "fanout: install failed for '$id'; see $log.install.log" >&2
   fi
 
   # opencode is a native binary; on Git Bash it needs a Windows-style path.

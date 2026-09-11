@@ -23,7 +23,7 @@
 #   /etc/nginx/conf.d/nginx-fedbench.conf
 #   (all three copied from $UNITSRC, default /home/agnidata/work/deploy -- NOT from the
 #    fedbackup checkout, which the nightly archive timers run out of and this never touches)
-#   SELinux: one boolean, one port label
+#   SELinux: one boolean, one port label, one fcontext rule on server/config
 #   the fedbackup venv (pip install of the already-declared `storage` extra, as fedbackup)
 #   secrets.env (appends the JWT secret and PGRST_DB_URI if absent; never rewrites an existing one)
 #
@@ -401,6 +401,50 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
+step "5b. The env file's SELinux label — systemd cannot read a user's home"
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# THE DENIAL, verbatim from ausearch:
+#
+#   avc: denied { read } for pid=1 comm="systemd" name="secrets.env"
+#        scontext=system_u:system_r:init_t:s0 tcontext=system_u:object_r:user_home_t:s0
+#
+# fedbackup's home IS /srv/fedbackup, so the whole checkout under it is labelled
+# user_home_dir_t / user_home_t. Policy deliberately forbids init_t from reading user home
+# content, and systemd reads EnvironmentFile from PID 1 -- so the unit fails with
+# "Failed to load environment files: Permission denied", which names neither SELinux nor the
+# label. Nothing about the file's mode or ownership is wrong; root can read it perfectly well
+# from a shell, which is what makes this one so misleading.
+#
+# ONE FILE, RELABELLED -- not a second copy in /etc. The entire design rests on PostgREST and
+# fed_storage verifying tokens with the SAME secret, and two files is precisely how they come to
+# differ. A divergence there gives working metadata reads and 401 on every object download, which
+# reads as a corrupt archive. So the canonical file stays where the bench's own tooling already
+# reads it and the LABEL moves instead.
+#
+# etc_t, because that is what /etc/sysconfig/* carries and systemd reads those as EnvironmentFile
+# every day. Scoped to server/config alone: not the home, not the checkout. fedbackup keeps full
+# access -- an unconfined user domain reads etc_t without trouble.
+CFGDIR="$REPO/server/config"
+if [ -d "$CFGDIR" ]; then
+  # -m if a rule is already there, -a if not. `-a` on an existing entry is an error, and the
+  # script has to stay re-runnable.
+  if semanage fcontext -l 2>/dev/null | grep -q "^$CFGDIR(/\.\*)\?"; then
+    semanage fcontext -m -t etc_t "$CFGDIR(/.*)?" 2>/dev/null && ok "updated the fcontext rule for $CFGDIR"
+  else
+    semanage fcontext -a -t etc_t "$CFGDIR(/.*)?" 2>/dev/null && ok "added an fcontext rule: $CFGDIR -> etc_t" \
+      || warn "could not add the fcontext rule -- install policycoreutils-python-utils"
+  fi
+  # The rule alone changes nothing already on disk; restorecon is what applies it. Without this
+  # the unit keeps failing and the rule looks like it did not work.
+  restorecon -Rv "$CFGDIR" 2>/dev/null | sed 's/^/      /'
+  newctx=$(ls -Zd "$SECRETS" 2>/dev/null | awk '{print $1}')
+  case "$newctx" in
+    *:etc_t:*) ok "secrets.env is now $newctx" ;;
+    *)         bad "secrets.env is still $newctx -- systemd will not be able to read it" ;;
+  esac
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
 step "6. Start them"
 # ══════════════════════════════════════════════════════════════════════════════════════════
 systemctl daemon-reload
@@ -456,6 +500,8 @@ cat <<'UNDO'
   # they survive a reboot and outlive everything above. Leaving them costs nothing and reverting
   # them is safe only if nothing ELSE on this box now needs them -- httpd_can_network_connect in
   # particular is a box-wide boolean, not a per-service one, so check before turning it off.
+  #   semanage fcontext -d '/srv/fedbackup/ferrodiode-pcb-testbench/server/config(/.*)?'
+  #   restorecon -Rv /srv/fedbackup/ferrodiode-pcb-testbench/server/config
   #   semanage port -d -t http_port_t -p tcp 8087
   #   setsebool -P httpd_can_network_connect 0     # only if no other httpd here proxies anywhere
   # /srv/fedbench and the secrets.env line are left deliberately -- removing them loses the

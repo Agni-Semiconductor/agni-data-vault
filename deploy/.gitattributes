@@ -1,0 +1,6 @@
+# These run on Linux, from systemd and from root shells. A CRLF in a shell script
+# fails as `syntax error near unexpected token $'do\r'` -- and only once a `for` or
+# `while` lands in it, so it can ride along invisibly for a long time first.
+*.sh text eol=lf
+*.service text eol=lf
+*.conf text eol=lf

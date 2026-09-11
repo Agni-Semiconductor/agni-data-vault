@@ -21,6 +21,8 @@
 #   /etc/systemd/system/fed-postgrest.service
 #   /etc/systemd/system/fed-storage.service
 #   /etc/nginx/conf.d/nginx-fedbench.conf
+#   (all three copied from $UNITSRC, default /home/agnidata/work/deploy -- NOT from the
+#    fedbackup checkout, which the nightly archive timers run out of and this never touches)
 #   SELinux: one boolean, one port label
 #   the fedbackup venv (pip install of the already-declared `storage` extra, as fedbackup)
 #   secrets.env (appends the JWT secret and PGRST_DB_URI if absent; never rewrites an existing one)
@@ -35,6 +37,14 @@ VENV=$REPO/server/.venv/bin/python
 PGRST_SRC=${PGRST_SRC:-/home/agnidata/work/bin/postgrest}
 OBJROOT=/srv/fedbench/objects
 PSQL=/usr/pgsql-17/bin/psql
+# Where the unit files and the nginx conf are read FROM.
+#
+# Not the fedbackup checkout, deliberately. That checkout is what the nightly archive timers run
+# out of, so switching its branch to pick up two unit files would change the code a live backup
+# job executes -- a much larger blast radius than the thing being fixed. Staging them under
+# /home/agnidata/work/deploy leaves the checkout untouched. The repo copy is still compared
+# against, below, so the divergence is reported rather than silent.
+UNITSRC=${UNITSRC:-/home/agnidata/work/deploy}
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
@@ -60,6 +70,30 @@ n=$(sudo -u postgres "$PSQL" -tAX -d fedbench -c "select count(*) from migration
 
 # The repo checkout the units run from.
 [ -d "$REPO" ] && ok "repo checkout at $REPO" || bad "no repo checkout at $REPO — the units' WorkingDirectory does not exist"
+
+# THE ROLES, and each absence fails as something other than itself.
+#
+#   authenticator  -- step 3 runs `alter role authenticator ... password`. Without the role that
+#                     statement errors, and the ORIGINAL version of step 3 then appended a
+#                     PGRST_DB_URI carrying a password nothing had been set to. A re-run would see
+#                     the URI present, report ok, and leave the broken credential in place
+#                     forever. Assert it here so the append can never outlive a failed alter.
+#   bench_read     -- PGRST_DB_ANON_ROLE. PostgREST refuses to start if it does not exist, which
+#                     at least fails loudly; asserting it just moves the failure earlier.
+#
+# Neither is created by the vault chain -- they come from the bench's selfhost_schema.sql. On a
+# database built only from supabase/migrations/selfhost they are simply absent.
+for r in authenticator bench_read; do
+  have=$(sudo -u postgres "$PSQL" -tAX -d fedbench -c "select 1 from pg_roles where rolname = '$r'" 2>/dev/null)
+  [ "$have" = 1 ] && ok "role $r exists" || bad "role $r does not exist -- apply the bench's selfhost_schema.sql roles first"
+done
+# PostgREST connects as authenticator and SET ROLEs to whatever the token names. Membership is
+# what permits that, and a missing grant fails at REQUEST time with a permission error, after a
+# perfectly clean startup -- so it is invisible until something actually asks for data.
+for r in vault_service vault_read connect_read bench_service bench_read; do
+  m=$(sudo -u postgres "$PSQL" -tAX -d fedbench -c "select 1 from pg_auth_members m join pg_roles g on g.oid=m.roleid join pg_roles a on a.oid=m.member where a.rolname='authenticator' and g.rolname='$r'" 2>/dev/null)
+  [ "$m" = 1 ] || bad "authenticator is not a member of $r -- tokens naming it will 500 at request time, not at startup"
+done
 
 # THE SECRET IS SHARED AND MUST NOT BE REGENERATED. PostgREST verifies tokens with it and
 # fed_storage verifies the SAME tokens with it; replace it once tokens are out and metadata reads
@@ -114,6 +148,29 @@ if [ -x "$VENV" ]; then
   fi
 else
   bad "no venv at $VENV, and the system python 3.9 lacks starlette/uvicorn"
+fi
+
+# THE FILES THIS SCRIPT IS ABOUT TO COPY, read rather than assumed. The first version asserted
+# only that the checkout DIRECTORY existed, which is how it passed while the units in it still
+# said `User=testingboard` and `/home/testingboard` -- written for the Pi, months after the target
+# moved. Installing those gives two services that fail to start for reasons that read as a broken
+# host rather than a stale file.
+for u in fed-postgrest.service fed-storage.service nginx-fedbench.conf; do
+  f="$UNITSRC/$u"
+  [ -r "$f" ] || { bad "missing $f -- stage it there before running this"; continue; }
+  ok "staged $u"
+  grep -q 'testingboard' "$f" && bad "  $u still names testingboard -- this is the Pi version"
+done
+# fed_storage is imported by whatever interpreter ExecStart names, and THAT is the one whose
+# dependencies matter. Checking `.venv/bin/python` while the unit runs `/usr/bin/python3` is
+# verifying one thing and shipping another -- which is exactly what this file did.
+if [ -r "$UNITSRC/fed-storage.service" ]; then
+  exe=$(grep -m1 '^ExecStart=' "$UNITSRC/fed-storage.service" | cut -d= -f2- | awk '{print $1}')
+  if [ "$exe" = "$VENV" ]; then
+    ok "fed-storage runs the venv interpreter ($exe)"
+  else
+    bad "fed-storage ExecStart runs $exe, but the dependency check above tested $VENV"
+  fi
 fi
 
 [ -x "$PGRST_SRC" ] && ok "PostgREST binary staged at $PGRST_SRC ($("$PGRST_SRC" --version 2>/dev/null))" \
@@ -192,27 +249,42 @@ if grep -qE '^PGRST_DB_URI=' "$SECRETS"; then
   ok "PGRST_DB_URI already present — leaving the authenticator password alone"
 else
   PW=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)
-  sudo -u postgres "$PSQL" -q -d fedbench -c "alter role authenticator with login password '$PW'" \
-    && ok "authenticator given a password"
-  umask 077
-  printf 'PGRST_DB_URI=postgres://authenticator:%s@127.0.0.1:5432/fedbench\n' "$PW" >> "$SECRETS"
-  chown fedbackup:fedbackup "$SECRETS"; chmod 0600 "$SECRETS"
-  ok "PGRST_DB_URI appended to secrets.env (0600, fedbackup)"
+  # THE APPEND IS GATED ON THE ALTER SUCCEEDING, and the first version was not. It wrote the URI
+  # unconditionally, so a failed alter left secrets.env holding a password nothing had been set
+  # to -- and the next run, seeing PGRST_DB_URI present, reported ok and never touched it again.
+  # A credential wrong forever, reported as fine, from one missing `if`.
+  if sudo -u postgres "$PSQL" -q -v ON_ERROR_STOP=1 -d fedbench \n       -c "alter role authenticator with login password '$PW'"; then
+    ok "authenticator given a password"
+    umask 077
+    printf 'PGRST_DB_URI=postgres://authenticator:%s@127.0.0.1:5432/fedbench
+' "$PW" >> "$SECRETS"
+    chown fedbackup:fedbackup "$SECRETS"; chmod 0600 "$SECRETS"
+    ok "PGRST_DB_URI appended to secrets.env (0600, fedbackup)"
+    # Prove the credential works before anything depends on it. PostgREST's failure for a bad
+    # password is a connection-retry loop, which reads as "the database is down".
+    PGPASSWORD="$PW" "$PSQL" -tAX -h 127.0.0.1 -U authenticator -d fedbench -c 'select 1' >/dev/null 2>&1 \n      && ok "authenticator connects over TCP with that password" \n      || bad "authenticator cannot connect with the password just set -- check pg_hba.conf allows scram on 127.0.0.1"
+  else
+    bad "could not set the authenticator password -- NOT writing PGRST_DB_URI"
+  fi
   unset PW
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 step "4. Unit files and the nginx shim"
 # ══════════════════════════════════════════════════════════════════════════════════════════
-# `cp`, NEVER `mv`. A moved file keeps its source SELinux context and systemd then refuses to load
-# it, reporting a problem with the unit rather than with the label.
-for u in fed-postgrest.service fed-storage.service; do
-  cp -f "$REPO/server/deploy/$u" /etc/systemd/system/ && ok "installed $u"
+for u in fed-postgrest.service fed-storage.service nginx-fedbench.conf; do
+  dest=/etc/systemd/system; [ "$u" = nginx-fedbench.conf ] && dest=/etc/nginx/conf.d
+  # `cp`, NEVER `mv`. A moved file keeps its source SELinux context and systemd then refuses to
+  # load it, reporting a problem with the unit rather than with the label.
+  cp -f "$UNITSRC/$u" "$dest/" && ok "installed $u -> $dest"
+  # The checkout is left alone (see UNITSRC), so say plainly when what was installed differs from
+  # what the repo on this box holds. A silent divergence between the running unit and the file
+  # that claims to describe it is the same class of problem the migration ledger exists to catch.
+  repo="$REPO/server/deploy/$u"
+  if [ -r "$repo" ] && ! cmp -s "$repo" "$UNITSRC/$u"; then
+    warn "  installed copy differs from $repo -- merge the branch into that checkout when convenient"
+  fi
 done
-# Kept byte-identical. Its two trailing-slash rules -- slash on the PostgREST target, none on
-# storage -- are the entire reason existing clients need no change. Re-encoding them elsewhere
-# moves documented, tested behaviour into an untested file.
-cp -f "$REPO/server/deploy/nginx-fedbench.conf" /etc/nginx/conf.d/ && ok "installed nginx-fedbench.conf verbatim"
 restorecon /etc/systemd/system/fed-*.service /etc/nginx/conf.d/nginx-fedbench.conf 2>/dev/null || true
 
 # ══════════════════════════════════════════════════════════════════════════════════════════

@@ -1,7 +1,8 @@
 # Agni Vault API systemd unit.
 #
 # Required environment (Contract v2.4): VAULT_REST_URL, VAULT_STORAGE_URL,
-# VAULT_SERVICE_JWT, VAULT_API_KEY, VAULT_IDENTITY_* (Access team domain and
+# VAULT_SERVICE_JWT, VAULT_API_KEY, VAULT_ACCESS_TEAM_URL, VAULT_ACCESS_AUD,
+# VAULT_EMAIL_DOMAIN (Access team domain and
 # application aud), VAULT_ADMIN_BOOTSTRAP, and VAULT_READONLY.
 #
 # RHEL 9 install warning: use `cp`, never `mv`, when installing this unit. A

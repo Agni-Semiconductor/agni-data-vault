@@ -12,7 +12,6 @@ Base URL: `https://vault.agnisemi.ai/api` publicly or the edaserver tailnet API 
 
 ## Environment
 
-Server: `VAULT_REST_URL`, `VAULT_STORAGE_URL`, `VAULT_SERVICE_JWT`, `VAULT_API_KEY`, `VAULT_IDENTITY_*`, `VAULT_ADMIN_BOOTSTRAP`, `VAULT_READONLY`.
 Client: `VITE_API_BASE_URL` only, and it is not secret. Removed: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
 
 | HTTP | Error code | Meaning |

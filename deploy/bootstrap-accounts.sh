@@ -200,7 +200,11 @@ Defaults:$DEPLOY_USER log_output
 Cmnd_Alias AGNI_SVC   = /usr/bin/systemctl, /usr/bin/journalctl
 Cmnd_Alias AGNI_PKG   = /usr/bin/dnf, /usr/bin/rpm
 Cmnd_Alias AGNI_SEL   = /usr/sbin/semanage, /usr/sbin/setsebool, /usr/sbin/restorecon, /usr/sbin/ausearch
-Cmnd_Alias AGNI_PG    = /usr/bin/psql, /usr/bin/pg_dump, /usr/bin/pg_restore, /usr/bin/createdb, /usr/bin/dropdb
+# /usr/pgsql-17/bin, NOT /usr/bin. On edaserver /usr/bin/psql is the RHEL AppStream 16
+# client and `psql` on PATH is Siemens Calibre's -- so a list naming /usr/bin/psql grants
+# sudo for a client that does not match the running 17.10 server, and withholds it for the
+# one that does.
+Cmnd_Alias AGNI_PG    = /usr/pgsql-17/bin/psql, /usr/pgsql-17/bin/pg_dump, /usr/pgsql-17/bin/pg_restore, /usr/pgsql-17/bin/createdb, /usr/pgsql-17/bin/dropdb
 Cmnd_Alias AGNI_NET   = /usr/bin/tailscale, /usr/bin/ss
 $DEPLOY_USER ALL=(root) AGNI_SVC, AGNI_PKG, AGNI_SEL, AGNI_NET
 $DEPLOY_USER ALL=(postgres) AGNI_PG

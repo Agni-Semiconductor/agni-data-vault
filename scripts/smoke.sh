@@ -4,7 +4,7 @@ set -euo pipefail
 if [[ -f .env.local ]]; then
   set -a; source .env.local; set +a
 fi
-: "${VAULT_API_URL:?Set VAULT_API_URL (for example https://<vercel-app>)}"
+: "${VAULT_API_URL:?Set VAULT_API_URL (for example https://vault.agnisemi.ai)}"
 : "${VAULT_API_KEY:?Set VAULT_API_KEY}"
 API="${VAULT_API_URL%/}/api"
 AUTH="Authorization: Bearer $VAULT_API_KEY"

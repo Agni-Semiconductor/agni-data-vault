@@ -60,8 +60,11 @@ authenticates rather than relying on the name being unguessable.
 - `VAULT_STORAGE_URL`: server, same origin as above.
 - `VAULT_SERVICE_JWT`: server, HS256, `role: vault_service`, minted by `tools/mint_service_jwt.py --role`.
 - `VAULT_API_KEY`: server, unchanged from v1.
-- `VAULT_IDENTITY_*`: server, Access team domain and application `aud` for JWT verification.
-- `VAULT_ADMIN_BOOTSTRAP`: server, seeds the first `admin` row in `people`.
+- `VAULT_ACCESS_TEAM_URL`: server, `https://<team>.cloudflareaccess.com`.
+- `VAULT_ACCESS_AUD`: server, the Access application's audience tag.
+- `VAULT_EMAIL_DOMAIN`: server, checked against the `hd` claim rather than the email suffix.
+- `VAULT_CORS_ORIGIN`: server, allowed browser origin. Same-origin through Cloudflare makes it
+  moot in production; it is what keeps local development working.
 - `VAULT_READONLY`: server, when `1`, rejects POST/PATCH/DELETE during phase-2 shakedown deploy.
 - `VITE_API_BASE_URL`: client, not secret; the API origin. This is the only permitted `VITE_` var.
 

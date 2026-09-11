@@ -276,8 +276,10 @@ credential ships in the browser bundle.
 | `VAULT_STORAGE_URL` | server | same origin as above |
 | `VAULT_SERVICE_JWT` | server | HS256, `role: vault_service`, minted by `tools/mint_service_jwt.py --role` |
 | `VAULT_API_KEY` | server | unchanged from v1 |
-| `VAULT_IDENTITY_*` | server | Access team domain + application `aud` for JWT verification |
-| `VAULT_ADMIN_BOOTSTRAP` | server | seeds the first `admin` row in `people` |
+| `VAULT_ACCESS_TEAM_URL` | server | `https://<team>.cloudflareaccess.com` — where the Access signing keys are fetched from |
+| `VAULT_ACCESS_AUD` | server | the Access application's audience tag, checked on every assertion |
+| `VAULT_EMAIL_DOMAIN` | server | checked against the `hd` claim, **not** the email suffix |
+| `VAULT_CORS_ORIGIN` | server | allowed browser origin; same-origin through Cloudflare makes it moot in production, and it is what keeps local dev working |
 | `VAULT_READONLY` | server | when `1`, rejects POST/PATCH/DELETE — used for the phase-2 shakedown deploy |
 | `VITE_API_BASE_URL` | client | **not secret**; the API origin. The only permitted `VITE_` var, and it holds no credential. |
 
@@ -943,3 +945,19 @@ about ownership and provenance, not a grant.
 default profile and the bench's client never sends `Accept-Profile` on any of its seven verbs.
 
 The full interface document for the consuming team is `docs/CONNECT_INTERFACE.md`.
+
+## v2.19 Two environment variables the documentation had wrong
+
+`VAULT_IDENTITY_*` never existed. The Access path reads `VAULT_ACCESS_TEAM_URL`, `VAULT_ACCESS_AUD`
+and `VAULT_EMAIL_DOMAIN`, and an operator following the old table would have set three variables
+nothing reads, then seen `VAULT_ACCESS_TEAM_URL is not set` at runtime — an error pointing at the
+code rather than at the instruction that caused it.
+
+`VAULT_ADMIN_BOOTSTRAP` is **not implemented** and setting it does nothing. The first admin comes from the `0103` seed, which inserts one row into `vault.allowlist` with `role = 'admin'`; `people` is a view over that table and `assertAdmin` reads `people.role`. To add an admin, insert a row — do not set an environment variable and expect it to take effect.
+
+`VAULT_CORS_ORIGIN` is read by `api/handler.js` and was documented nowhere; it is in the table now.
+
+`tests/envVarParity.test.ts` now fails on any of the three: a variable the server reads and no
+document mentions, a variable a document names and the server never reads, or `VAULT_IDENTITY`
+reappearing in the Access path. **The second direction is the one that fails silently** — the
+operator sets it, nothing complains, and the feature is simply not configured.

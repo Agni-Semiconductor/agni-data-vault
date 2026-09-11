@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { FIGURE_SORT_KEYS, asFigureSortKey } from '../src/lib/figures'
 import { COHORT_SORT_KEYS, asCohortSortKey } from '../src/lib/cohorts'
+import { DEVICE_SORT_KEYS, VERDICT_SORT_KEYS } from '../src/lib/devices'
 
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}})
 const spec:FigureSpec={layout:'1x1',panels:[{unit:'A',traces:[{src:{file_id:'file-1'},x:'voltage',y:'current',label:'device'}]}]}
@@ -65,5 +66,33 @@ describe('the cohorts client and API agree on what is sortable too', () => {
     expect(asCohortSortKey('name')).toBe('name')
     expect(asCohortSortKey('predicate')).toBeUndefined()
     expect(asCohortSortKey(undefined)).toBeUndefined()
+  })
+})
+
+describe('and the devices client agrees with its API too', () => {
+  it('DEVICE_SORT_KEYS matches devices.js DEVICE_SORT_KEYS exactly', () => {
+    // Third time this parity check has caught two workers writing two different allow-lists.
+    // They cannot see each other's files, so the test is the only thing that closes the gap.
+    const source = readFileSync(resolve(process.cwd(), 'api/_lib/resources/devices.js'), 'utf8')
+    const match = source.match(/const DEVICE_SORT_KEYS = \[([^\]]*)\]/)
+    expect(match, 'DEVICE_SORT_KEYS not found in devices.js -- this test pins it').toBeTruthy()
+    const server = match![1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+    expect([...DEVICE_SORT_KEYS].sort()).toEqual(server.sort())
+  })
+
+  it('VERDICT_SORT_KEYS matches too, and covers every column the report displays', () => {
+    // The verdict report had NO sorting at all and a hardcoded ascending order, so the oldest
+    // degradation sat on page one of a "what changed" report. Adding sorting meant a fourth
+    // copy of an allow-list appeared (server, client, the page's own local one, and the type);
+    // they are one list now, and this pins it.
+    const source = readFileSync(resolve(process.cwd(), 'api/_lib/resources/devices.js'), 'utf8')
+    const match = source.match(/const VERDICT_SORT_KEYS = \[([^\]]*)\]/)
+    expect(match, 'VERDICT_SORT_KEYS not found in devices.js').toBeTruthy()
+    const server = match![1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+    expect([...VERDICT_SORT_KEYS].sort()).toEqual(server.sort())
+    // Every column the table renders must be sortable, or a header shows an arrow for a sort
+    // the server quietly refused.
+    for (const column of ['device_address', 'prev_verdict', 'new_verdict', 'direction', 'prev_run_id', 'run_id', 'started_at'])
+      expect(VERDICT_SORT_KEYS, `${column} is a table column but not sortable`).toContain(column)
   })
 })

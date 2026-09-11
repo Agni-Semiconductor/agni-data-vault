@@ -912,3 +912,34 @@ of the export format, not against the format**. `tests/realfile.test.ts` is gate
 **Consequence for anyone deploying this:** treat the first production ingest of a Clarius workbook
 as a dry run and read the per-measurement log lines. Pointing `VAULT_REAL_XLSX` at one real
 workbook retires this in full and nothing else does.
+
+## v2.18 The `connect` schema is the only promised surface (amends v2.12 §12)
+
+`vault` and `public` are **implementation**. Nothing outside this repository may depend on them.
+The one exception is `connect` (migration `0118`): seven read-only views, consumed by agni-connect,
+whose shapes are a promise — columns may be **added** without notice and are never removed or
+retyped without telling the consumer first.
+
+`connect_read` holds `USAGE` on that schema, `SELECT` on those views, and **nothing on `vault` or
+`public`**. It does not hold `BYPASSRLS`, which `vault_read` does — RLS-enabled-with-no-policies
+returns zero rows without it, and that is exactly why `vault_read` is the wrong role to hand out:
+with the flag, one wrong grant exposes everything instead of nothing.
+
+**`connect` is the one place `security_invoker` is deliberately OFF.** Every other view here sets
+it on, because a view running as its owner punches through the RLS invariant *by accident*. Here it
+is the reviewed intent: it is what lets the interface role hold no grant on the underlying schemas
+at all. Verified by a probe that compares row counts through `connect.health` as the role against
+the owner — a comparison that fails outright (`permission denied for table samples`) the moment
+`security_invoker` is turned on.
+
+The interface excludes every `notes` column, `created_by`/`updated_by`, and `people`, `allowlist`,
+`audit_log` and `agent_queries` entirely. `measured_by` is exposed: it is a declared field with an
+option list, and attributing a measurement to a person is its purpose.
+
+Read-only, deliberately. A second product writing into the measurement database is a conversation
+about ownership and provenance, not a grant.
+
+`PGRST_DB_SCHEMAS` is now `public,vault,connect` — **`public` stays first**, because it is the
+default profile and the bench's client never sends `Accept-Profile` on any of its seven verbs.
+
+The full interface document for the consuming team is `docs/CONNECT_INTERFACE.md`.

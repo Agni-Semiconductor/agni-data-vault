@@ -1,0 +1,229 @@
+# The measurement data endpoint, for agni-connect
+
+**Audience:** whoever is writing agni-connect. This is the whole of what you need to read
+measurement data, and the whole of what is promised to you.
+
+**Status:** the schema and role are built and verified (migration `0118`, probe
+`verify_0118.sql`). The host is **not stood up yet** — see [What is not true yet](#what-is-not-true-yet).
+Nothing here requires a change on your side once it is.
+
+---
+
+## 1. The one-paragraph version
+
+There is one Postgres cluster on `edaserver`. The measurement data lives in the `fedbench`
+database. You read it over HTTP through PostgREST, from **your server**, using a schema called
+`connect` that exists specifically for you. You get seven read-only views, a token, and a promise
+that those views do not change shape without someone telling you. You do not get the vault's
+tables, and your browser never touches any of this.
+
+---
+
+## 2. Your architecture is the same shape as ours
+
+You said agni-connect is also going on Vercel. Then it wants the same topology, and the reasons
+are worth having rather than copying:
+
+```
+  browser
+    |
+    v
+  devops.agnisemi.ai            (Cloudflare; Access = Google Workspace SSO)
+    |-- /        --> Vercel      your SPA. Static. No secrets, no VITE_ vars.
+    '-- /api/*   --> Tunnel  --> edaserver 127.0.0.1:<your port>   your API server
+                                        |
+                                        v  loopback, never the network
+                                 127.0.0.1:8087  nginx --> PostgREST :3000
+                                                       --> fed_storage :3001
+```
+
+**Why the API cannot stay on Vercel.** Access's session cookie is only a first-party cookie if the
+SPA and the API are the same origin — Safari blocks it otherwise. Cloudflare fronting one hostname
+with two origins gives the browser one origin while Vercel still serves the SPA.
+
+**Why that is also the security answer.** Your API server on `edaserver` reaches PostgREST over
+**loopback**. The token never crosses a network, and the data plane (`/rest/v1`, `/storage/v1`) is
+never published through a tunnel — only your own `/api` is. What goes public is an application
+endpoint that authenticates every request, not a PostgREST origin holding a database credential.
+
+**Three rules that are not negotiable, because breaking any one of them is an incident:**
+
+1. **Nothing secret reaches the browser.** Vite inlines every `VITE_`-prefixed variable into the
+   bundle as a literal string, served to anyone who can load the page. Our rule is *nothing at all*
+   starts with `VITE_` except one non-secret base URL, and we have a CI test that greps for it —
+   because "nothing *secret* starts with `VITE_`" requires every future author to correctly
+   classify their own variable, and that version cannot be checked.
+2. **Verify the Access assertion, don't trust it.** Cloudflare sets `Cf-Access-Jwt-Assertion`.
+   Check its *signature* against your team's public keys and check `aud`. A proxy-injected header
+   you trust is a header anyone who reaches the origin by another route can forge. Also strip any
+   client-supplied `Cf-Access-*` on ingress, and bind your API to `127.0.0.1`.
+3. **No path is protected by SSO alone.** Every path independently validates a credential. SSO is
+   an *additional* gate on human paths, never the only one.
+
+---
+
+## 3. How you connect
+
+| | |
+|---|---|
+| **Base URL** | `http://127.0.0.1:8087/rest/v1` — loopback, from your API server on `edaserver` |
+| **Profile** | `Accept-Profile: connect` on every GET (`Content-Profile` for writes, which you have none of) |
+| **Auth** | `Authorization: Bearer <jwt>`, HS256, claim `{"role": "connect_read"}` |
+| **Database** | `fedbench` |
+
+```bash
+curl -s 'http://127.0.0.1:8087/rest/v1/measurements?kind=eq.pund&limit=5' \
+  -H 'Accept-Profile: connect' \
+  -H "Authorization: Bearer $CONNECT_JWT"
+```
+
+**Forget `Accept-Profile` and you get the bench schema**, because `public` is first in
+`PGRST_DB_SCHEMAS` and is therefore the default profile. You will get a 404 for a table name that
+plainly exists, which reads as "the endpoint is broken" rather than "you asked the wrong schema".
+Set the header in your HTTP client once, centrally.
+
+### The token
+
+**You will be given a token. You will not be given the signing secret, and you should not ask for
+it.** The data plane uses HS256, where the verification key and the signing key are the same
+string — so anyone holding the secret can mint a token claiming `role: vault_service`, which holds
+`BYPASSRLS` and write access to every table in the database. "Give agni-connect read access" and
+"give agni-connect unrestricted write access to all measurement data" would be the same act.
+
+Practically: the token goes in `/etc/agni-connect/api.env` (mode `0640`, owned `root:<your service
+user>`), it is read at process start, and it never appears in a log line, a URL, or a client
+bundle. If you need to re-mint one, ask — and if self-service minting turns out to be something you
+genuinely need, say so, because that requires moving the data plane to asymmetric keys (RS256 with
+a JWKS endpoint) so the signing key can stay in one place. That is a real change to PostgREST *and*
+`fed_storage`, worth doing deliberately rather than discovering.
+
+---
+
+## 4. What you can read
+
+Seven views. **This list is the contract.** Everything else in the database — `vault.*`,
+`public.*` — is our implementation and will keep moving; the vault gained eighteen migrations in a
+few weeks, promoting columns out of JSON, adding a storage bucket, adding a device dimension. If
+you had been reading our tables, every one of those would have been your outage.
+
+| View | What it is |
+|---|---|
+| `connect.samples` | The sample registry. `sample_id` is the human key, `id` the uuid every foreign key uses — **both travel**, because joining on the wrong one gives you an empty result rather than an error. |
+| `connect.measurements` | One row per measurement. Carries `sample_key` so you can report without a join, plus the device address, pad geometry, and the bench run it came from. |
+| `connect.files` | **This is the one your spec actually describes.** Raw-data path plus checksum: `bucket`, `storage_path`, `sha256`, `size_bytes`, `upload_state`. |
+| `connect.metrics` | Derived numbers per measurement — on/off, Ec±, Pr, leakage — with `extractor_version` and `skipped`. |
+| `connect.bench_runs` | Bench campaigns, with `n_cells_recorded` **counted from child rows**, not read from the run's own roll-up. |
+| `connect.kinds` | The measurement-kind registry: canonical axis columns and their **units**. |
+| `connect.health` | Row counts through the same views you read. See §6. |
+
+### Four things about the data that will mislead you if nobody says them
+
+**`upload_state` is not decoration.** A `files` row can sit in `pending` or `failed` from an
+abandoned upload. Treat every row as retrievable bytes and you will eventually ask for an object
+that was never stored.
+
+**`meta_status` travels whole, and it matters.** It is a `{key: confirmed | assumed | unknown}` map
+per row. A value being present does not mean anyone verified it. If you are computing anything that
+gets acted on, filter to `confirmed`. There is also a fourth state — the key being *absent* — which
+means nobody recorded a confidence at all; that is not the same as `unknown`, and folding them
+together inflates how much of this corpus is trustworthy. We hand you the raw map rather than a
+"completeness score" because the score would be our opinion and the map is the fact.
+
+**`skipped` on a metric is a refusal, not an absence.** A measurement with no metric row was never
+processed. A metric row with a null value and a `skipped` reason was processed and the extractor
+declined — the sweep sat at compliance, there was no usable channel. Averaging over "rows that have
+a number" silently drops both and reports a mean over an unstated subset.
+
+**`n_cells_recorded`, never a run's own count.** `campaign_runs.n_measured` is written at the *end*
+of a run, so a live 86-hour campaign reports `0` while tens of thousands of child rows exist. Our
+own tooling learned this the hard way; the view does the counting so you cannot.
+
+### Units
+
+Read them from `connect.kinds`, don't type them into your code. The bench emits both `i_a` (amps)
+and `current_mA` for the same quantity, and overlaying them without conversion is a 1000× error
+that looks exactly like real data. One of our own migrations declared a single unit for an axis
+whose column list had both, and a capture carrying only the legacy column would have been labelled
+amperes. The registry exists so that mistake has one place to be made and be fixed.
+
+---
+
+## 5. What you cannot read, and why
+
+`connect_read` holds `USAGE` on schema `connect`, `SELECT` on its seven views, and **nothing at all
+on `vault` or `public`** — verified by a probe that enumerates every table in both schemas rather
+than checking a list, so it keeps holding for migrations written after it.
+
+Specifically unreachable by any path: `vault.people` and `vault.allowlist` (identities),
+`vault.audit_log`, `vault.agent_queries` (free-text queries), and every `notes` column. Operator
+free text is the PII surface and the one field our search agent's threat model already treats as
+untrusted content; a tool tracking artefacts and checksums has no use for it.
+
+`connect_read` also does **not** hold `BYPASSRLS`. Our `vault_read` does — RLS is enabled with no
+policies, so anything without the flag reads zero rows — which is exactly why `vault_read` is a bad
+thing to hand another team: with it, one wrong grant exposes everything instead of nothing.
+
+**Read-only, and that is a decision rather than an oversight.** If agni-connect needs to write
+something into the measurement database, that is a conversation about what it owns and where the
+provenance comes from, not a grant. Your own devops tables belong in your own database.
+
+---
+
+## 6. Check that it works — properly
+
+The loudest silent failure on this box: **a role that cannot read does not error, it returns
+nothing.** RLS is enabled with no policies, so a grant mistake means every query answers `[]` and
+your application shows an empty database rather than an access failure. A health check that returns
+`200 {"ok": true}` reports perfect health in exactly that state.
+
+So `connect.health` counts rows *through the views you read*:
+
+```bash
+curl -s 'http://127.0.0.1:8087/rest/v1/health' \
+  -H 'Accept-Profile: connect' -H "Authorization: Bearer $CONNECT_JWT"
+# {"n_samples":2106,"n_measurements":2106,"n_files":...,"observed_at":"..."}
+```
+
+**Alert on the numbers, not on the status code.** Zero where there should be thousands is the
+failure mode you are actually exposed to.
+
+---
+
+## 7. Getting the bytes
+
+`connect.files` gives you `bucket` + `storage_path` + `sha256`. Those are stable identifiers, not
+URLs — deliberately, so this deployment's hostname never ends up baked into your database.
+
+To fetch an object, go through `fed_storage` on the same loopback origin
+(`/storage/v1/object/<bucket>/<path>`) with a token that has storage rights. If you need that, ask;
+it is a different grant from the one above and it is worth deciding rather than defaulting.
+
+Two buckets exist. `bench` holds the testbench's own captures and is **read-only to everyone
+outside the bench** — an unused delete on the system of record turns a path-confinement bug from a
+disclosure into data loss, so the absence is enforced rather than incidental.
+
+---
+
+## 8. What is not true yet
+
+Honest status, so you can plan around it:
+
+- **The host is not stood up.** No PostgREST, no `fed_storage`, no Caddy, no tunnel on `edaserver`
+  yet. The schema, the role and the grants are built and verified against PostgreSQL 17.10 locally,
+  including a negative test that the role cannot reach a single base table.
+- **Your own database is not provisioned.** One cluster, a database per product — so agni-connect's
+  own tables get their own database on the same cluster. Note that **PostgREST serves exactly one
+  database**, so the instance you read `connect` from cannot also serve your tables. Either run your
+  own PostgREST against your own database, or talk to it directly over libpq from your API. Worth
+  deciding early; it does not affect anything in this document.
+- **Ports and hostnames** for your side (`devops.agnisemi.ai`, your loopback port, your tunnel) are
+  not allocated yet.
+
+## 9. If something here is wrong for you
+
+Say so before building around it. Adding a column to a `connect` view is cheap and we will do it;
+discovering six months in that you have been reading `vault.measurements` directly is the expensive
+version of the same conversation.
+
+Columns may be **added** to these views without notice. They are not removed or retyped without
+telling you first.

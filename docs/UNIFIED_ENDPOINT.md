@@ -70,7 +70,7 @@ reasons it cannot be forged — but the signature check is the one that matters.
 ## 2. The database: one cluster, two schemas
 
 ```
-PGRST_DB_SCHEMAS="public,vault"        # public FIRST -- see below
+PGRST_DB_SCHEMAS="public,vault,connect"  # public FIRST -- see below; connect is 0118
 PGRST_DB_ANON_ROLE="bench_read"        # zero grants => 403, never []
 PGRST_DB_EXTRA_SEARCH_PATH="extensions"
 ```

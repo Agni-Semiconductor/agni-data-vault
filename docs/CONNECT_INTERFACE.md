@@ -219,6 +219,14 @@ Honest status, so you can plan around it:
 - **Ports and hostnames** for your side (`devops.agnisemi.ai`, your loopback port, your tunnel) are
   not allocated yet.
 
+## 8a. Building the rest of agni-connect
+
+`docs/PLATFORM_BLUEPRINT.md` describes the whole architecture this repo runs on — repo layout, the
+one-handler-two-hosts trick that lets the same code run on Vercel and as a daemon, the Vercel
+config, the systemd unit, the Cloudflare Access verification, the principal-based auth model, the
+env-var conventions, the port map, and the RHEL 9 SELinux traps. **agni-connect gets its own
+database on the shared cluster**; that document says exactly what is shared and what is not.
+
 ## 8b. agni-connect's OWN data
 
 agni-connect is an issue tracker, so most of its data has nothing to do with measurements. Two

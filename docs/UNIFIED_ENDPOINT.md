@@ -216,9 +216,10 @@ confident wrong answer. **Verified**: `campaign_analysis` imports with only `too
 `PYTHONPATH`, because a second way for that import to resolve is a second thing to get wrong.
 
 `tools/vault_metrics.py` is the **first** script in `tools/` that is not stdlib-only: reading a
-Clarius `.xlsx` needs `openpyxl`, and the unit runs `/usr/bin/python3`. `dnf install
+Clarius `.xlsx` needs `openpyxl`, and the vault-metrics unit runs `/usr/bin/python3`. `dnf install
 python3-openpyxl` on edaserver, or the timer fails as a `ModuleNotFoundError` in the journal
-that reads like a broken script rather than an unfinished install.
+that reads like a broken script rather than an unfinished install. This is not fed-storage:
+fed-storage runs `/srv/fedbench/venv/bin/python`.
 
 **Verified about the adapter** (26 tests, `server/tests/test_vault_metrics.py`):
 
@@ -546,28 +547,69 @@ documents do not disagree; this paragraph exists so a future reader does not thi
 
 ## 7. Deploying it: what bites
 
-**RHEL 9 SELinux is enforcing, and every one of these fails as something else:**
+**RHEL 9 SELinux is enforcing, and the installed paths matter more than mode bits.**
+`fedbackup`'s home is `/srv/fedbackup`; its testbench checkout at
+`/srv/fedbackup/ferrodiode-pcb-testbench` therefore starts out `user_home_dir_t` or
+`user_home_t`. Root can read those files from a shell, but systemd reads `EnvironmentFile` from
+PID 1 under `init_t`, and policy forbids `init_t` from reading `user_home_t`. The result is
+`Failed to load environment files: Permission denied` even when owner and mode are correct.
+
+Systemd also cannot exec a binary labelled `user_home_t`. Pointing `ExecStart` at the bench's
+`.venv/bin/python` produced `Failed to locate executable ...: Permission denied`, which reads as
+a missing file rather than a label problem; the actual denial was `{ read }` on the Python
+symlink (`tcontext=user_home_t`, `tclass=lnk_file`). `fed-postgrest` started in the same run
+because `/usr/local/bin/postgrest` is `bin_t`: that label permits exec and lets the service
+transition out of `init_t`. That contrast is the diagnosis.
+
+Apply all three labels, each for its distinct access:
+
+- `/srv/fedbackup/ferrodiode-pcb-testbench/server/config` -> `etc_t`, so systemd can read
+  `secrets.env`.
+- `/srv/fedbench/venv/bin` -> `bin_t`, so systemd can exec the fed-storage interpreter.
+- `/srv/fedbackup/ferrodiode-pcb-testbench/server/src` -> `usr_t`, so the service can import the
+  code.
+
+`semanage fcontext` records only the rule; `restorecon -R` applies it. Adding the rule without
+running `restorecon` looks like a fix while every file still has the denial-causing label. Debug
+with `sudo ausearch -m avc -ts recent`; on this host, suspect SELinux first.
 
 - `setsebool -P httpd_can_network_connect 1` — without it nginx proxying to loopback is denied
   and you see a 502.
 - `semanage port -a -t http_port_t -p tcp 8087` — without it nginx cannot bind that port.
-- `semanage fcontext` + `restorecon -Rv` for any new directory.
 - **Install units with `cp`, never `mv`.** A moved file keeps its source SELinux context and
   systemd then refuses to load it.
-- Debug ritual: `sudo ausearch -m avc -ts recent`. Suspect SELinux first.
+
+**Fed-storage has its own virtualenv at `/srv/fedbench/venv`, built from `/usr/bin/python3`
+(3.9.25).** The bench's `.venv` has no pip because uv deliberately builds virtualenvs without it:
+`python -m pip` fails with `No module named pip`, which reads as a broken environment rather than
+one made by a different tool, and `ensurepip` did not repair it. The system interpreter includes
+pip through `ensurepip`, so this venv can be maintained independently. It also keeps the vault's
+data path out of a uv-managed environment: `uv sync` can prune the editable `keithley-control`
+install a running campaign depends on. Python 3.9 is sufficient as verified: fed_storage imports
+only `psycopg`, `starlette`, `uvicorn` and stdlib, uses deferred annotations in every module, and
+all seven files parse under the 3.9 grammar.
+
+**The live object root is `/srv/fedbench/objects` (0750 `fedbackup`) on the RAID1 root
+filesystem, not `/srv/nextcloud/fedbench/objects`.** The latter is the nightly cold archive on a
+single non-redundant 7.3T disk; serving it live would make backup and primary the same directory,
+so a writer bug could damage the only copy.
 
 **The JWT secret:** `PGRST_JWT_SECRET` must be ≥32 characters or PostgREST refuses to start —
-the one misconfiguration here that fails loudly. It must be the **same value** as
-`FED_PGRST_JWT_SECRET`, or metadata reads succeed while object downloads 401, which reads as
-"the archive is corrupt" rather than "the secret is wrong". Mint tokens with
-`tools/mint_service_jwt.py --role {bench_service|vault_service}`. **The secret is in no dump** —
-losing that string bricks the whole data plane.
+the one misconfiguration here that fails loudly. The shared secret was minted during installation
+and lives only in `/srv/fedbackup/ferrodiode-pcb-testbench/server/config/secrets.env` (0600
+`fedbackup`, `etc_t`); it is in no `pg_dump`. It must never be regenerated: PostgREST and
+fed-storage verify the same tokens with it, so a new value gives working metadata reads and 401
+on every object download, which reads as a corrupt archive rather than a mismatched key. Mint
+tokens with `tools/mint_service_jwt.py --role {bench_service|vault_service}`.
 
 **PostgREST must be the x86_64 build.** Every install note in the testbench repo hardcodes
 aarch64, from when the Pi was the target.
 
-**Tailscale:** the ACL needs `agnipi → edaserver:443`, or the bench watcher cannot reach the
-new endpoint — and it fails by backing off silently, not by erroring.
+**The endpoint is not published yet.** PostgREST 16.3, fed-storage and the nginx shim listen on
+`127.0.0.1:3000`, `127.0.0.1:3001` and `127.0.0.1:8087` respectively; `ss -lnt` verified all
+three are loopback-only. Caddy, the Tailscale certificate and the Cloudflare tunnel are not done.
+When the tailnet endpoint is published, its ACL needs `agnipi -> edaserver:443`, or the bench
+watcher backs off silently rather than reporting the missing path.
 
 ---
 

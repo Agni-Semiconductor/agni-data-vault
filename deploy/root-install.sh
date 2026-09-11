@@ -392,7 +392,15 @@ else
     ok "PGRST_DB_URI appended to secrets.env (0600, fedbackup)"
     # Prove the credential works before anything depends on it. PostgREST's failure for a bad
     # password is a connection-retry loop, which reads as "the database is down".
-    PGPASSWORD="$PW" "$PSQL" -tAX -h 127.0.0.1 -U authenticator -d fedbench -c 'select 1' >/dev/null 2>&1 \n      && ok "authenticator connects over TCP with that password" \n      || bad "authenticator cannot connect with the password just set -- check pg_hba.conf allows scram on 127.0.0.1"
+    # One line, for the same reason as the ALTER above -- and this one had the identical defect.
+    # It only LOOKED like it worked: both -d and -U are explicit here, so psql discarded the stray
+    # `n` as a surplus argument instead of taking it for a username. The tell was in the output,
+    # `...with that password n`, the bug printing itself onto the end of a success message.
+    if PGPASSWORD="$PW" "$PSQL" -tAX -h 127.0.0.1 -U authenticator -d fedbench -c 'select 1' >/dev/null 2>&1; then
+      ok "authenticator connects over TCP with that password"
+    else
+      bad "authenticator cannot connect with the password just set -- check pg_hba.conf allows scram on 127.0.0.1"
+    fi
   else
     bad "could not set the authenticator password -- NOT writing PGRST_DB_URI"
   fi

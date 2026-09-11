@@ -3,14 +3,14 @@
 **Audience:** whoever is writing agni-connect. This is the whole of what you need to read
 measurement data, and the whole of what is promised to you.
 
-**Status: the schema is LIVE on edaserver** as of 2026-09-11. Database `fedbench` on the PGDG
-17.10 cluster, all 19 migrations applied, `connect_read` created, and the interface verified in
-place — `connect_read` reads the seven views with row counts identical to the owner's and is
-refused on every base table in `vault` and `public`.
+**Status: the endpoint is LIVE on edaserver** as of 2026-09-11. Database `fedbench` on the PGDG
+17.10 cluster has all 19 migrations applied, `connect_read` created, and the interface verified
+through the HTTP path. `connect_read` reads the seven views and is refused on every base table in
+`vault` and `public`.
 
-**The HTTP listener is not up yet.** PostgREST, `fed_storage`, nginx and Caddy are not installed
-(that needs root and is a separate step), so you cannot reach it over the wire today. Nothing in
-this document changes when it goes up.
+**The HTTP listener is LOOPBACK ONLY.** PostgREST, `fed_storage`, and the nginx shim are active,
+but Caddy, the Tailscale certificate, and the Cloudflare tunnel are not done. You cannot reach the
+endpoint from your own machine yet; the URL below works only from an API server on `edaserver`.
 
 ---
 
@@ -89,11 +89,13 @@ Set the header in your HTTP client once, centrally.
 
 ### The token
 
-**You will be given a token. You will not be given the signing secret, and you should not ask for
-it.** The data plane uses HS256, where the verification key and the signing key are the same
-string — so anyone holding the secret can mint a token claiming `role: vault_service`, which holds
-`BYPASSRLS` and write access to every table in the database. "Give agni-connect read access" and
-"give agni-connect unrestricted write access to all measurement data" would be the same act.
+**A `connect_read` token is HS256 with a `role` claim, signed with the shared secret. Request it
+from Owen.** The secret is mode `0600`, and nobody else on the box can mint one. You will not be
+given the signing secret, and you should not ask for it. The data plane uses HS256, where the
+verification key and the signing key are the same string — so anyone holding the secret can mint a
+token claiming `role: vault_service`, which holds `BYPASSRLS` and write access to every table in
+the database. "Give agni-connect read access" and "give agni-connect unrestricted write access to
+all measurement data" would be the same act.
 
 Practically: the token goes in `/etc/agni-connect/api.env` (mode `0640`, owned `root:<your service
 user>`), it is read at process start, and it never appears in a log line, a URL, or a client
@@ -186,11 +188,23 @@ So `connect.health` counts rows *through the views you read*:
 ```bash
 curl -s 'http://127.0.0.1:8087/rest/v1/health' \
   -H 'Accept-Profile: connect' -H "Authorization: Bearer $CONNECT_JWT"
-# {"n_samples":2106,"n_measurements":2106,"n_files":...,"observed_at":"..."}
+# {"n_samples":0,"n_measurements":0,"n_files":0,"n_metrics":0,"n_bench_runs":0}
 ```
 
-**Alert on the numbers, not on the status code.** Zero where there should be thousands is the
-failure mode you are actually exposed to.
+Those zeros are correct today: the 19 migrations built the schema, but no vault data has been
+migrated from hosted Supabase yet. Do not use this empty health result as the liveness probe.
+Probe `connect.kinds` instead; the migration chain seeds it, and it currently returns seven rows
+through the full path, so it cannot pass vacuously against an empty database:
+
+```bash
+curl -s 'http://127.0.0.1:8087/rest/v1/kinds' \
+  -H 'Accept-Profile: connect' -H "Authorization: Bearer $CONNECT_JWT"
+# seven rows
+```
+
+**Alert on the numbers, not on the status code, once data exists.** Then zero `n_samples` where
+there should be thousands is the failure mode you are actually exposed to: a lost `BYPASSRLS`
+returns an empty result rather than an error.
 
 ---
 
@@ -213,9 +227,10 @@ disclosure into data loss, so the absence is enforced rather than incidental.
 
 Honest status, so you can plan around it:
 
-- **The host is not stood up.** No PostgREST, no `fed_storage`, no Caddy, no tunnel on `edaserver`
-  yet. The schema, the role and the grants are built and verified against PostgreSQL 17.10 locally,
-  including a negative test that the role cannot reach a single base table.
+- **The endpoint is not reachable from your machine yet.** PostgREST 16.3 is on `127.0.0.1:3000`,
+  `fed_storage` is on `127.0.0.1:3001`, and the nginx shim is on `127.0.0.1:8087`; all are
+  loopback-only. Caddy, the Tailscale certificate, and the Cloudflare tunnel are not done, so there
+  is no published path to the endpoint yet.
 - **Your own database is not provisioned.** One cluster, a database per product — so agni-connect's
   own tables get their own database on the same cluster. Note that **PostgREST serves exactly one
   database**, so the instance you read `connect` from cannot also serve your tables. Either run your

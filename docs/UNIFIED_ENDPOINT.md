@@ -26,7 +26,7 @@ nothing has exercised yet — treat the difference as load-bearing.
 └───────────────────────────────┘  └──────┤   └ :3001 fed_storage          │
                                           │ 127.0.0.1:5432 Postgres 17.10  │
                                           │   db `fedbench`: public + vault│
-                                          │ /srv/... 1 TB                  │
+                                          │ / 888G raid1 · /storage 3.8T    │
                                           └────────────────────────────────┘
 ```
 
@@ -668,9 +668,79 @@ than any other performance work here.
 
 Prerequisites nobody has done yet: DNS delegation for `vault.agnisemi.ai` (the domain is not on
 Cloudflare), Google Workspace as an Access IdP, the Tailscale ACL entry, the x86_64 PostgREST
-binary, re-pulling the archive and **proving it restorable** (`state/last_restore_verify.json`
-is missing and the last pull is dated 2026-08-14), and a **second physical copy** before either
-cutover — after which the hosted projects stop being one.
+binary, and **proving the archive restorable** — see the corrected status below.
+
+
+### Verified ON THE BOX, 2026-09-11 — and three things above were wrong
+
+First login to `edaserver` (RHEL 9.8, x86_64, 64 cores). Everything in this block was read from
+the running system rather than inferred, and it corrects claims this document had been carrying.
+
+**WRONG: "the last pull is dated 2026-08-14".** The archive is healthy and current. It ran
+**this morning at 02:07:43**, and every fedbench timer is firing on schedule:
+
+```
+watermark: captures.id <= 25794  (51671 rows across 11 tables)
+objects -> /srv/nextcloud/fedbench/objects
+  tree                 904.0 MB in 25786 files
+manifest: /srv/nextcloud/fedbench/manifests/supabase_20260911T060720Z
+```
+
+That also updates the figures to check a restore against: **25,786 files / 904.0 MB**, not the
+25,079 / 896,372,323 recorded earlier. The object pull was a clean incremental no-op — every row
+skipped, 0 B downloaded — which is what an up-to-date archive looks like, not a failure.
+
+**RIGHT, and now precise: the restore verification has never happened.**
+`systemctl show fedbench-verify.service -p ExecMainStartTimestamp` returns **empty** — the unit has
+never started once. Its timer is enabled and next fires 2026-10-01. So the gate stands exactly as
+written: the archived bytes are provably intact and nobody has ever proved they come back as a
+working database.
+
+**WRONG: "1 TB".** There are four volumes and they differ in the way that matters:
+
+| Mount | Size | Used | Redundancy |
+|---|---|---|---|
+| `/` | 888 G | 28 G | **RAID1**, two NVMe mirrored |
+| `/storage` | 3.8 T | 824 G | **RAID1**, two NVMe mirrored |
+| `/srv/nextcloud` | 7.3 T | 55 G | **single disk, no RAID** |
+| `/mnt/nasbackup` | 11 T | 4.6 T | NFS → `10.10.10.50:/volume1/server-backups` |
+
+Consequences. Postgres defaults to `/var/lib/pgsql` on `/`, which is mirrored with 861 G free —
+the right home, and no decision needed. **The archive lives on the one volume with no
+redundancy**, which is what `ARCHIVE_RUNBOOK.md` §E1 warned about and is now measured rather than
+suspected. And **the NAS exists and is mounted with 6 T free**, so the second-physical-copy gate
+that blocked both cutovers looks satisfiable today rather than "awaiting hardware".
+
+**NEW, and it will bite: the EDA toolchain shadows the database client.**
+
+```
+$ command -v psql
+/home/shared/eda/siemens/calibre/current/bin/psql     <- Siemens Calibre ships its own
+/usr/pgsql-17/bin/psql                                <- the one matching the running server
+```
+
+Both PostgreSQL 16 (RHEL module) and 17.10 (PGDG) are installed; 17.10 is the running service, on
+`127.0.0.1:5432` and already loopback-only. **Every script must use the absolute path.** This is
+the concrete form of the isolate-from-the-EDA-toolchain concern in the `agni-connect` spec: not a
+hypothetical about a Postgres cluster, an actual `PATH` collision that would have a migration run
+against whatever client Calibre bundles.
+
+**Ports are clear.** Nothing is listening on 3000, 3001, 8087, 8098, 8099, 443 or 80, and none of
+`postgrest`, `caddy`, `cloudflared`, `nginx`, `node` or `rclone` is installed. `restic` is.
+Phase 0 is a clean install rather than a negotiation with something already running.
+
+**Ownership.** The vault-side units run as `fedbackup` from `/srv/fedbackup/ferrodiode-pcb-testbench`,
+mode `0750` and unreadable to anyone else — which is correct, and is why an unprivileged survey
+reports those paths as empty rather than as denied.
+
+### Unrelated, and live: the bench has been down since 2026-09-10 14:02
+
+`fedbench-health` — the dead-man's switch — has logged **212 consecutive failures**, first at
+`Sep 10 14:02:31`, with `heartbeat: remote: <urlopen error timed out>`. `agnipi` shows offline on
+the tailnet for about the same interval. The last campaign, `camp_bulk_test_20260904T190930Z_3fcf5c`,
+is `completed`, so nothing is mid-run and nothing is being lost — the write path is local-first, so
+an outage costs sync lag rather than data. Worth noticing that the alert threshold is 3 and it has
+fired 212 times.
 
 ### The bulk data is already on edaserver (2026-09-11)
 

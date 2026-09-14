@@ -1,0 +1,16 @@
+# Companion timer for fedbench-healthz.service. THIS is the unit you enable.
+#
+# Do not set Persistent=true: replaying a missed liveness probe after reboot reports on a moment that
+# has passed. The only useful liveness fact is whether the endpoint is up NOW, when this probe runs.
+# The small delay keeps this timer from starting on an exact boundary with another disk user.
+
+[Unit]
+Description=Every-five-minute fedbench endpoint liveness probe
+OnFailure=fedbench-alert@%n.service
+
+[Timer]
+OnCalendar=*:0/5
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

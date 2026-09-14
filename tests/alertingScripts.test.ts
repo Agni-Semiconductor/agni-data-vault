@@ -54,7 +54,11 @@ function run(script: string, args: string[], env: Record<string, string>, pathPr
   return { status: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
 }
 
-describe('deploy alerting scripts', () => {
+// These suites spawn bash once or more per assertion. Under the full suite's parallelism that
+// exceeds vitest's 5s default and the run fails on TIME, not on behaviour -- a red suite that
+// says nothing about the code is worse than a slow one. Scoped here rather than raised
+// globally, so a genuinely hanging test elsewhere still fails fast.
+describe('deploy alerting scripts', { timeout: 30_000 }, () => {
   it.runIf(BASH)('escapes journal output through a real JSON encoder', () => {
     // Journal text from a failed DATABASE job contains quotes and backslashes as a matter of
     // course. Hand-built JSON breaks on the first one, and Slack answers 400 -- which reads as a

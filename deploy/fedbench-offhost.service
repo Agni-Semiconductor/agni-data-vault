@@ -1,0 +1,29 @@
+# Copy the completed local fedbench dump to the configured off-host destination. Enable the
+# companion TIMER, not this unit, because enabling a completed oneshot would run a copy at every
+# boot.
+
+[Unit]
+Description=Copy the fedbench backup off-host
+OnFailure=fedbench-alert@%n.service
+
+[Service]
+# This is a task that finishes, not a daemon; the timer provides the retry cadence.
+Type=oneshot
+# The local dumps are owned by postgres, so running as another user would turn a readable dump into
+# a permission failure before the copy starts.
+User=postgres
+EnvironmentFile=-/etc/fedbench/offhost.env
+# The destination is deliberately supplied by configuration because it may be a mounted network
+# filesystem. A missing environment file leaves the unit loadable, but the script will reject an
+# unset destination rather than silently copying to an unintended path.
+ExecStart=/usr/local/bin/backup-offhost.sh --dest ${FEDBENCH_OFFHOST_DEST}
+# ProtectSystem cannot be strict: the destination is unknown at authoring time, so it cannot be
+# listed in ReadWritePaths; strict would make the real network mount unwritable and fail the copy.
+ProtectSystem=full
+# A network destination does not get an unbounded timeout: a hung NFS mount would otherwise leave
+# this oneshot stuck forever and hide successive backup failures. Thirty minutes allows a multi-GB
+# LAN copy while still returning control to systemd when the mount is wedged.
+TimeoutStartSec=30min
+PrivateTmp=true
+NoNewPrivileges=true
+ReadOnlyPaths=/srv/fedbench/backups

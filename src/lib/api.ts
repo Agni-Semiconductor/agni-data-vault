@@ -3,7 +3,7 @@ import type { FieldDef, ListResult, Measurement, MetaStatus, OptionList, OptionV
 
 type WritePayload = { columns: Record<string, unknown>; meta: Record<string, unknown>; meta_status: Record<string, MetaStatus> }
 type ListParams = { q?: string; filters?: Record<string, unknown>; sort?: { key: string; desc: boolean }; limit?: number; offset?: number; defs?: FieldDef[] }
-type Stats = { samples:number; measurements:number; files:number; bytes:number; by_kind:Record<string,number>; recent:Array<{id:string;measurement_id:string;sample_id:string;sample_uuid?:string;sample_key?:string;measured_on:string|null;kind:string|null}> }
+type Stats = { samples:number; measurements:number; files:number; bytes:number; by_kind:Record<string,number>; recent:Array<{measurement_id:string;sample_id:string;sample_uuid?:string;measured_on:string|null;kind:string|null}> }
 type ApiError = Error & { code?: string; details?: unknown }
 const apiBase=(import.meta.env.VITE_API_BASE_URL??'').replace(/\/$/,'')
 async function fail(response:Response){if(response.ok)return response;const body=await response.json().catch(()=>null) as {error?:{code?:string;message?:string;details?:unknown}}|null;throw Object.assign(new Error(body?.error?.message??`Request failed (${response.status})`),{code:body?.error?.code??'request_failed',details:body?.error?.details}) as ApiError}

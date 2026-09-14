@@ -50,6 +50,33 @@ else
   bad "service User='${SERVICE_USER:-missing}' does not exist -- timer runs would fail as systemd user setup, not as a dump error"
 fi
 
+# CAN THAT USER ACTUALLY READ THE DATABASE? The check above -- that the OS account exists -- was
+# necessary and nowhere near sufficient, and the gap cost three nights of failed backups plus a
+# manual run that also failed.
+#
+# fedbackup owns the archive tree and every bench service, so it LOOKED like the backup user. Inside
+# Postgres it has nothing: no memberships, no SELECT on any table, no BYPASSRLS. `pg_dump` as that
+# role fails with "permission denied for schema vault".
+#
+# This reproduces what pg_dump does rather than approximating it: `row_security = off`, then read a
+# seeded table. Two failures are covered at once. A role without SELECT is denied outright; a role
+# WITH select but without BYPASSRLS gets "query would be affected by row-level security policy",
+# because every vault table has RLS enabled with no policies. Either way the dump fails -- loudly,
+# which is the one mercy, but a failed backup all the same.
+if [ -n "$SERVICE_USER" ] && [ -x "$PSQL" ]; then
+  probe=$(runuser -u "$SERVICE_USER" -- "$PSQL" -tAX -d "$DB" \
+    -c 'set row_security = off; select count(*) from vault.field_definitions;' 2>&1 | tail -1)
+  case "$probe" in
+    ''|*[!0-9]*)
+      bad "$SERVICE_USER cannot read $DB the way pg_dump will: $probe"
+      bad "  a backup that cannot read the database is not a backup, and the timer reports 203/EXEC or an exit code, never an empty file" ;;
+    0)
+      bad "$SERVICE_USER reads vault.field_definitions as 0 rows -- it is seeded and never legitimately empty, so this is a privilege failure wearing an empty-database costume" ;;
+    *)
+      ok "$SERVICE_USER can read $DB with row_security off ($probe rows in vault.field_definitions)" ;;
+  esac
+fi
+
 # The timer offsets prevent two disk-heavy jobs sharing a boundary. Read both committed schedules:
 # changing one timer without this assertion otherwise looks like an intermittent database failure.
 BACKUP_CALENDAR=$(awk -F= '$1 == "OnCalendar" { print $2; exit }' "$TIMER" 2>/dev/null)

@@ -101,6 +101,37 @@ describe('deploy systemd units are safe before an operator installs them', () =>
     expect(offenders, 'without [Install] WantedBy= systemctl enable may enable nothing, reading as a service that disappeared after reboot').toEqual([])
   })
 
+  /**
+   * A template unit (`name@.service`) that some OTHER unit names in its OnFailure= is run by that
+   * reference, not by an [Install] section or a timer -- and enabling it would be the bug, since a
+   * completed oneshot with [Install] runs at every boot.
+   *
+   * The exception is narrow ON PURPOSE. It applies only when a reference actually exists in
+   * deploy/: an unreferenced template is exactly the dead unit the rule below is for, and
+   * "it's a template" must not become the sentence that excuses one.
+   */
+  function referencedByOnFailure(path: string): boolean {
+    if (!/@\.service$/.test(path)) return false
+    // show() normalises the separator; a raw split on '/' never splits a Windows path, so this
+    // silently found no references at all and every template looked like a dead unit.
+    const instance = show(path).split('/').pop()!.replace(/@\.service$/, '@')
+    return files
+      .filter((other) => other !== path)
+      .some((other) => contents(other).some((line) => /^\s*OnFailure=/.test(line) && line.includes(instance)))
+  }
+
+  it('only exempts a template unit from the rule below when something really triggers it', () => {
+    // The control for the exception. If this stops holding, the exemption has become a hole and
+    // the next dead oneshot walks through it wearing an @.
+    const templates = files.filter((path) => /@\.service$/.test(path))
+    expect(templates.length, 'expected at least one template unit to exercise this').toBeGreaterThan(0)
+    for (const path of templates) {
+      expect(referencedByOnFailure(path), `${show(path)} is a template nothing triggers`).toBe(true)
+    }
+    // And a template name that appears nowhere must NOT be exempt.
+    expect(referencedByOnFailure(resolve(deploy, 'no-such-unit@.service'))).toBe(false)
+  })
+
   it('pairs every timer-driven oneshot with a timer that IS enableable', () => {
     // The check that replaces the one above for oneshot units, and it is the stronger one. A
     // oneshot with no [Install] and no timer is never run by anything, and that is indisputably
@@ -112,6 +143,7 @@ describe('deploy systemd units are safe before an operator installs them', () =>
         const timer = path.replace(/\.service$/, '.timer')
         return !existsSync(timer) || !section(contents(timer), 'Install').some((l) => /^\s*WantedBy=/.test(l))
       })
+      .filter((path) => !referencedByOnFailure(path))
       .map(show)
     expect(offenders, 'a oneshot with neither [Install] nor an enableable .timer is never run by anything').toEqual([])
   })

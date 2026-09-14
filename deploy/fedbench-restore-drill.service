@@ -1,0 +1,31 @@
+# Prove the newest fedbench backup restores. Run by fedbench-restore-drill.timer -- enable the
+# TIMER, not this unit; a completed oneshot with an [Install] section runs at every boot.
+#
+# A dump that has never been restored is a hypothesis. This unit is what turns it into a fact on a
+# schedule rather than on the day someone needs it.
+
+[Unit]
+Description=Restore the newest fedbench backup into a scratch database and compare it
+# Reported to Slack by the template alerter. Without this line the drill fails exactly the way the
+# backup failed for three nights: correctly, in a journal nobody reads.
+OnFailure=fedbench-alert@%n.service
+
+[Service]
+Type=oneshot
+# postgres, NOT root. The script switches to postgres itself when invoked as root, so running the
+# unit as postgres skips the switch and keeps the drill at the privilege it actually needs. postgres
+# already owns the dumps -- fedbench-backup.service writes them as this user -- and is a superuser
+# over peer auth on the unix socket, which createdb and dropdb both require.
+User=postgres
+# /usr/local/bin, NOT the checkout: /srv/agni-data-vault carries a default label, and systemd
+# refuses to exec what it may not transition into, reporting 203/EXEC as if the file were missing.
+ExecStart=/usr/local/bin/restore-drill.sh
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+# The drill reads backups and writes only its success stamp. It creates and drops a scratch
+# DATABASE, which is not a filesystem write and needs no path here.
+ReadWritePaths=/var/lib/fedbench
+# A restore of the full archive will take far longer than the seed data does today. This ceiling
+# exists so a wedged restore is reported rather than left running until someone notices.
+TimeoutStartSec=3h

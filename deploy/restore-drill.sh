@@ -241,4 +241,17 @@ if [ "$fail" -gt 0 ]; then
   printf '\n\033[31mVERDICT: restore drill FAILED (%d failure(s)); scratch database removed.\033[0m\n' "$fail"
   exit 1
 fi
+# Record the proof. fedbench-deadman.sh alarms when this stamp goes stale, which is how a drill
+# that quietly STOPPED RUNNING gets noticed -- a timer that never fires produces no failure, no
+# journal line, and nothing for OnFailure= to react to.
+#
+# A failure to write the stamp must not fail a drill that passed: the restore is the result, the
+# stamp is bookkeeping. It is reported, not fatal. The installer pre-creates the file owned by
+# postgres so this works without granting write on the directory itself.
+STAMP=${FEDBENCH_STATE_DIR:-/var/lib/fedbench}/last-drill-success
+if date +%s >"$STAMP" 2>/dev/null; then
+  ok "recorded the successful drill in $STAMP"
+else
+  printf '  \033[33mwarn\033[0m  could not write %s -- the liveness check will call this stale\n' "$STAMP"
+fi
 printf '\n\033[32mVERDICT: restore drill PASSED; scratch database removed.\033[0m\n'

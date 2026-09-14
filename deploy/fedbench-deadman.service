@@ -1,0 +1,23 @@
+# Daily check that the scheduled work actually happened. Run by fedbench-deadman.timer -- enable
+# the TIMER, not this unit.
+#
+# The findings this script prints ARE the alert body: the script exits non-zero, OnFailure= fires
+# the template alerter, and the alerter posts the last 20 journal lines. One webhook implementation,
+# one place it can break.
+
+[Unit]
+Description=Check that fedbench backups and restore drills are actually happening
+OnFailure=fedbench-alert@%n.service
+
+[Service]
+Type=oneshot
+# root: it reads the alert-delivery marker under /var/lib/fedbench, which the alerter writes 0600
+# because a failed alert quotes journal output. Everything this unit does is a read.
+User=root
+ExecStart=/usr/local/bin/fedbench-deadman.sh
+# strict, not full: this unit writes nothing at all, and saying so is cheaper than auditing it later.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+TimeoutStartSec=120

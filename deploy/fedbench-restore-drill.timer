@@ -1,0 +1,21 @@
+# Companion timer for fedbench-restore-drill.service. THIS is the unit you enable.
+#
+# Weekly, not monthly: a month is a long time to run on an unrestorable backup, and this project
+# has already spent three nights running on a backup that never ran at all. Weekly is cheap at the
+# current 10 MB and will want revisiting once the bench data lands and a restore costs real I/O.
+#
+# Sunday 03:40 sits after fedbench-backup.timer (02:20 + up to 15m jitter) and before
+# tailscale-cert.timer (04:40), so the drill tests a dump written hours earlier rather than racing
+# the job that writes it.
+
+[Unit]
+Description=Weekly proof that the fedbench backup restores
+
+[Timer]
+OnCalendar=Sun *-*-* 03:40:00
+RandomizedDelaySec=600
+# An outage must not skip the proof silently; run it once the box is back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

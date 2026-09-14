@@ -1,0 +1,29 @@
+# Report a failed fedbench job to Slack. This unit is TRIGGERED, never enabled: every fedbench job
+# names it in its own OnFailure=, and the instance is the failing unit's name, so one template
+# covers every job present and future:
+#
+#     [Unit]
+#     OnFailure=fedbench-alert@%n.service
+#
+# It has no [Install] section deliberately. Enabling a completed oneshot would fire an alert at
+# every boot -- the same trap that made the backup service dangerous to enable.
+
+[Unit]
+Description=Report the failure of %i to Slack
+# Do not alert about the alerter: a loop here would post until the channel is unusable.
+OnFailure=
+
+[Service]
+Type=oneshot
+# %i is the failing unit's own name, passed through unchanged.
+ExecStart=/usr/local/bin/fedbench-notify-failure.sh %i
+# root, because the webhook in /etc/fedbench/alert.env is root-only (0600). It is a bearer
+# credential: anyone who can read it can post to the channel as this alerter.
+User=root
+# The alerter reads the journal and posts; it writes only its own marker file.
+ProtectSystem=full
+ReadWritePaths=/var/lib/fedbench
+PrivateTmp=true
+NoNewPrivileges=true
+# A hung alert must not hold a slot forever -- curl already has --max-time 20 plus two retries.
+TimeoutStartSec=120

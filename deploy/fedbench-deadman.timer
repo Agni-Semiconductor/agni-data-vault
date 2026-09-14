@@ -1,0 +1,17 @@
+# Companion timer for fedbench-deadman.service. THIS is the unit you enable.
+#
+# 09:15, deliberately during the working day. An alarm posted at 03:00 is read at 09:00 anyway, and
+# a check that runs at 09:15 reports on the night that just finished -- including the case where
+# the box was off overnight and the backup never ran.
+
+[Unit]
+Description=Daily fedbench backup and drill liveness check
+
+[Timer]
+OnCalendar=*-*-* 09:15:00
+RandomizedDelaySec=300
+# A box that was down at 09:15 still needs the check, and needs it on the day it comes back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -26,6 +26,12 @@ fail=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; fail=$((fail + 1)); }
 step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+# warn() reports something the reader must know without failing the run. It was used before it was
+# defined, which bash reports as `warn: command not found` on stderr and then CARRIES ON -- so the
+# message is lost, the exit status is unaffected, and the only trace is a line that looks like a
+# typo rather than a missing report. The other install scripts in this directory define it; this
+# one did not, and the idiom was copied across without the helper.
+warn() { printf '  \033[33mwarn\033[0m  %s\n' "$*"; }
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
 

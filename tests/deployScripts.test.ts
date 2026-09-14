@@ -71,6 +71,21 @@ export function unquotedBackslashN(text: string): string[] {
   return offenders
 }
 
+/**
+ * Shell text with whole-line comments removed, for checks about what a script DOES.
+ *
+ * Defined here rather than imported, and the reason is on the nose: the first version of the
+ * undefined-helper check below borrowed this from tests/caddyConfig.test.ts without bringing it
+ * across — the same mistake that check exists to catch, made inside it. TypeScript caught this one
+ * at compile time, which is the only difference between the two.
+ */
+function stripComments(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n')
+}
+
 /** Everything under deploy/ that is executed by bash or read by systemd. */
 function deployFiles(dir: string, out: string[] = []): string[] {
   if (!existsSync(dir)) return out
@@ -154,6 +169,41 @@ describe('deploy scripts carry no character that fails as something else', () =>
     expect(found, '0x01 must be caught').toBe(true)
     const clean = Buffer.from('s/x/\\1/p\n\tindented\n', 'utf8')
     expect([...clean].some((b) => b < 32 && ![9, 10, 13].includes(b)), 'tabs and newlines are fine').toBe(false)
+  })
+
+  it('every reporting helper a script calls is defined in that script', () => {
+    // bash resolves a function name when the line RUNS, so calling an undefined one passes
+    // `bash -n`, prints `warn: command not found` to stderr, and then carries on. The message the
+    // helper was supposed to deliver is lost, the exit status is unaffected, and the only trace
+    // looks like a typo rather than a missing report.
+    //
+    // backup-install.sh called warn() without defining it, having borrowed the idiom from
+    // caddy-install.sh. It surfaced during a real install, on the one line that was trying to tell
+    // the operator their backup unit was in a failed state.
+    const HELPERS = ['ok', 'bad', 'warn', 'step']
+    const offenders = shellScripts.flatMap((path) => {
+      const text = readFileSync(path, 'utf8')
+      const defined = new Set(
+        [...text.matchAll(/^\s*([a-z_][a-z0-9_]*)\s*\(\)\s*\{/gim)].map((m) => m[1]),
+      )
+      // A call is the helper name at the start of a command: line start, or after && || ; | ( or
+      // then/else/do. Quoted mentions and comments are excluded by requiring command position.
+      return HELPERS.filter((h) => {
+        if (defined.has(h)) return false
+        const called = new RegExp(`(?:^|[;&|(]|\\b(?:then|else|do)\\s)\\s*${h}\\s+["'$]`, 'm')
+        return called.test(stripComments(text))
+      }).map((h) => `${show(path)}: calls ${h}() but never defines it`)
+    })
+    expect(offenders, 'an undefined helper loses its message and leaves a line that reads as a typo').toEqual([])
+  })
+
+  it('the undefined-helper detector fires, and does not fire on a definition', () => {
+    const defined = (t: string) => new Set([...t.matchAll(/^\s*([a-z_][a-z0-9_]*)\s*\(\)\s*\{/gim)].map((m) => m[1]))
+    const calls = (t: string, h: string) =>
+      new RegExp(`(?:^|[;&|(]|\\b(?:then|else|do)\\s)\\s*${h}\\s+["'$]`, 'm').test(stripComments(t))
+    expect(calls('warn "a thing"\n', 'warn'), 'a bare call must be seen').toBe(true)
+    expect(defined('warn() { printf x; }\n').has('warn'), 'a definition must be seen').toBe(true)
+    expect(calls('# warn "only in a comment"\n', 'warn'), 'a comment is not a call').toBe(false)
   })
 
   it('no bash-interpreted literal backslash-n in any deploy script', () => {

@@ -81,12 +81,18 @@ describe('deploy/restore-drill.sh safeguards', () => {
     // by a worker this test's author could not see. What must hold is that the expectations come
     // from the live database at run time: a count query against the live database name, and a
     // second against the scratch one, so the two can be compared.
-    expect(script, 'counts must be read from the live database, not hardcoded').toMatch(
-      /"\$PSQL"[^\n]*-d\s+"\$DB"[^\n]*count\(\*\)/i,
+    // Both sides must be READ, whatever the query is called. The first version required
+    // `count(*)` on the same line as the psql invocation, which broke the moment the count moved
+    // into a SQL variable so one query could enumerate every table -- against a script that was
+    // strictly better at the job this assertion exists to protect.
+    expect(script, 'the live database must be queried at run time').toMatch(
+      /"\$PSQL"[^\n]*-d\s+"\$DB"/,
     )
-    expect(script, 'and from the restored scratch database, so there is something to compare').toMatch(
-      /"\$PSQL"[^\n]*-d\s+"\$SCRATCH"[^\n]*count\(\*\)/i,
+    expect(script, 'and the restored scratch database too, so there is something to compare').toMatch(
+      /"\$PSQL"[^\n]*-d\s+"\$SCRATCH"/,
     )
+    // An exact count, somewhere, is what makes the comparison meaningful.
+    expect(script, 'the comparison must rest on an exact count').toMatch(/count\(\*\)/)
     // A literal expected count is the thing being ruled out: it rots the moment a migration seeds
     // another row, and then the drill either fails for the wrong reason or gets "fixed" by editing
     // the number.
@@ -161,6 +167,54 @@ describe('deploy/restore-drill.sh safeguards', () => {
     // And the integrity check must still exist somewhere, or dropping index 0 would lose it.
     expect(directives(script), 'archive integrity must still be asserted on its own')
       .toMatch(/gzip\s+-t/)
+  })
+
+  it('enumerates the tables to compare instead of naming them', () => {
+    const script = readFileSync(scriptPath, 'utf8')
+    // PROVEN NECESSARY, not preferred. Against a dump built with --exclude-table=bench.captures,
+    // holding 25,087 rows in the live database, the previous version -- which named four vault
+    // vocabulary tables -- printed:
+    //
+    //     VERDICT: restore drill PASSED; scratch database removed.
+    //
+    // A hardcoded list cannot see a table it does not name, and every table that will actually
+    // hold measurement data is a table it did not name. Asking the database what it contains means
+    // new tables are covered the day they appear, including the whole bench schema.
+    expect(directives(script), 'the table list must come from the catalog, not from this file')
+      .toMatch(/pg_class|pg_stat_user_tables|information_schema\.tables/)
+    expect(directives(script), 'and the counts must be exact, not estimated')
+      .toMatch(/count\(\*\)/)
+    // n_live_tup is a planner ESTIMATE that drifts between vacuums. Comparing estimates would make
+    // the drill flap on a healthy restore and stay quiet on a lossy one.
+    expect(directives(script), 'n_live_tup is an estimate and must not be the basis of comparison')
+      .not.toMatch(/n_live_tup\s*(?:=|as\s+count)/)
+    // The property the checks above only approximate: the compared SET is built at run time, and
+    // the loop walks that set rather than a list written here. A mutation that kept the catalog
+    // name while returning a fixed list slipped past the looser version of this test.
+    expect(directives(script), 'the comparison must iterate a set built at run time')
+      .toMatch(/for\s+\w+\s+in\s+"\$\{!\w+\[@\]\}"/)
+    expect(directives(script), 'no literal table-name list may drive the comparison')
+      .not.toMatch(/\w+=\(\s*(?:field_definitions|samples|measurements|captures)/)
+  })
+
+  it('refuses to certify a restore when the live database is too empty to prove anything', () => {
+    const script = readFileSync(scriptPath, 'utf8')
+    // "Compare every non-empty table" is vacuously satisfied by a database with none -- which is
+    // exactly what RLS-enabled-no-policies produces for a role lacking BYPASSRLS. Without a floor
+    // the drill would compare zero tables and report PASSED.
+    expect(directives(script), 'a minimum number of non-empty source tables must be required')
+      .toMatch(/MIN_TABLES/)
+    expect(directives(script), 'and falling below it must be a failure, not a warning')
+      .toMatch(/-lt\s+"\$MIN_TABLES"[\s\S]{0,200}?bad /)
+  })
+
+  it('reports a table that vanished from the restore rather than skipping it', () => {
+    const script = readFileSync(scriptPath, 'utf8')
+    // The failure mode that a per-table loop over the RESTORED side cannot see: iterate the
+    // restored database and a table missing entirely is simply never visited. The loop must run
+    // over the LIVE side, so absence is a finding.
+    expect(directives(script), 'a table present live and absent in the restore must be reported')
+      .toMatch(/missing\)\s*bad |bad "restored [^"]*MISSING/)
   })
 
   it('pins PostgreSQL 17 client binaries rather than resolving them from PATH', () => {

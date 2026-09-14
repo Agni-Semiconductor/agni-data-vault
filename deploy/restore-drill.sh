@@ -166,17 +166,50 @@ for tool in "$PSQL" "$PG_RESTORE" "$CREATEDB" "$DROPDB"; do
   pg "$tool" --version >/dev/null 2>&1 && ok "can execute $tool" || bad "cannot execute $tool"
 done
 
-step "2. Assertions -- read non-empty seeded source tables"
-tables=(field_definitions option_values measurement_kinds metric_definitions)
+step "2. Assertions -- enumerate every non-empty table in the live database"
+# ENUMERATED, not listed. This check used to name four vault vocabulary tables. The moment real
+# data lands, a hardcoded list still passes while samples, measurements, files and every bench
+# table come back EMPTY -- a green drill certifying nothing, which is worse than no drill.
+#
+# Asking the database what it contains means the drill covers new tables the day they appear,
+# including the whole `public` bench schema when the testbench data arrives, with no edit here.
+COUNT_SQL="select n.nspname || '|' || c.relname || '|' ||
+       (xpath('/row/c/text()', query_to_xml(
+          format('select count(*) as c from %I.%I', n.nspname, c.relname), false, true, '')))[1]::text
+from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'r' and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+order by 1"
+
+live_raw=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$DB" -c "$COUNT_SQL" 2>&1)
 declare -A live_counts=()
-for table in "${tables[@]}"; do
-  count=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$DB" -c "select count(*) from vault.$table" 2>&1 | tail -1)
-  case "$count" in
-    ''|*[!0-9]*) bad "could not count live vault.$table: $count" ;;
-    0) bad "live vault.$table has zero rows; a zero source cannot prove a restore" ;;
-    *) live_counts[$table]=$count; ok "live vault.$table has $count row(s)" ;;
-  esac
-done
+live_tables=0
+live_rows=0
+if printf '%s' "$live_raw" | grep -q '^[A-Za-z_][A-Za-z0-9_]*|'; then
+  while IFS='|' read -r schema table count; do
+    [ -n "$table" ] || continue
+    case "$count" in ''|*[!0-9]*) continue ;; esac
+    # Only non-empty tables are comparable: an empty table restores as empty and proves nothing
+    # either way, and several in this schema are legitimately empty today.
+    [ "$count" -gt 0 ] || continue
+    live_counts["$schema.$table"]=$count
+    live_tables=$((live_tables + 1))
+    live_rows=$((live_rows + count))
+  done <<EOF
+$(printf '%s' "$live_raw")
+EOF
+else
+  bad "could not enumerate live tables: $(printf '%s' "$live_raw" | tail -1)"
+fi
+
+# A floor, because "compare every non-empty table" is vacuously satisfied by a database with none.
+# That is exactly what the RLS-enabled-no-policies design produces for a role without BYPASSRLS,
+# and a drill that silently compared zero tables would report PASSED.
+MIN_TABLES=${FEDBENCH_DRILL_MIN_TABLES:-4}
+if [ "$live_tables" -lt "$MIN_TABLES" ]; then
+  bad "only $live_tables non-empty table(s) in $DB (expected at least $MIN_TABLES) -- a source this empty cannot prove a restore"
+else
+  ok "live database has $live_tables non-empty table(s), $live_rows row(s) total"
+fi
 
 if [ "$CHECK" -eq 1 ]; then
   if [ "$fail" -gt 0 ]; then
@@ -221,15 +254,35 @@ if [ -n "$SCRATCH" ] && [ -r "$DUMP" ]; then
   else
     bad "pg_restore failed; scratch database was not fully restored"
   fi
-  for table in "${tables[@]}"; do
-    count=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$SCRATCH" -c "select count(*) from vault.$table" 2>&1 | tail -1)
-    case "$count" in
-      ''|*[!0-9]*) bad "could not count restored vault.$table: $count" ;;
-      0) bad "restored vault.$table has zero rows; schema without rows is not a backup" ;;
-      "${live_counts[$table]:-missing}") ok "restored vault.$table matches live count $count" ;;
-      *) bad "restored vault.$table has $count row(s), live has ${live_counts[$table]:-unknown}" ;;
+  # Read the restored side the same way, then compare EVERY table the live database has rows in.
+  # A table present in live and missing from the restore never appears here, so it is reported by
+  # the absence check below rather than passing unnoticed.
+  scratch_raw=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$SCRATCH" -c "$COUNT_SQL" 2>&1)
+  declare -A scratch_counts=()
+  while IFS='|' read -r schema table count; do
+    [ -n "$table" ] || continue
+    case "$count" in ''|*[!0-9]*) continue ;; esac
+    scratch_counts["$schema.$table"]=$count
+  done <<EOF
+$(printf '%s' "$scratch_raw")
+EOF
+
+  matched=0
+  for key in "${!live_counts[@]}"; do
+    want=${live_counts[$key]}
+    got=${scratch_counts[$key]:-missing}
+    case "$got" in
+      missing) bad "restored $key is MISSING; live has $want row(s)" ;;
+      0)       bad "restored $key has zero rows; schema without rows is not a backup" ;;
+      "$want") matched=$((matched + 1)) ;;
+      *)       bad "restored $key has $got row(s), live has $want" ;;
     esac
   done
+  if [ "$matched" -eq "$live_tables" ] && [ "$live_tables" -gt 0 ]; then
+    ok "all $matched non-empty table(s) match live, $live_rows row(s) total"
+  elif [ "$matched" -gt 0 ]; then
+    ok "$matched of $live_tables table(s) match live"
+  fi
 else
   bad "restore was not attempted because no scratch database or readable archive is available"
 fi
@@ -249,7 +302,10 @@ fi
 # stamp is bookkeeping. It is reported, not fatal. The installer pre-creates the file owned by
 # postgres so this works without granting write on the directory itself.
 STAMP=${FEDBENCH_STATE_DIR:-/var/lib/fedbench}/last-drill-success
-if date +%s >"$STAMP" 2>/dev/null; then
+# The braces matter: `cmd >file 2>/dev/null` redirects the COMMAND's stderr, but bash reports a
+# failed redirection itself before the command ever runs, so an unwritable path printed a raw
+# "No such file or directory" above the warn line. Grouping puts the redirection inside.
+if { date +%s >"$STAMP"; } 2>/dev/null; then
   ok "recorded the successful drill in $STAMP"
 else
   printf '  \033[33mwarn\033[0m  could not write %s -- the liveness check will call this stale\n' "$STAMP"

@@ -297,7 +297,7 @@ esac
 
 if [ "$TEST_ALERT" -eq 1 ]; then
   step "9. Test alert -- this POSTS to the Slack channel"
-  if "$BINDIR/fedbench-notify-failure.sh" fedbench-backup.service; then
+  if FEDBENCH_ALERT_TEST=1 "$BINDIR/fedbench-notify-failure.sh" fedbench-backup.service; then
     ok "test alert delivered -- confirm it is visible in the channel"
   else
     bad "test alert was NOT delivered; see the message above and $STATEDIR/alert-delivery-failed"

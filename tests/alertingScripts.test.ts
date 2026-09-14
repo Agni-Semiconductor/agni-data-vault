@@ -239,6 +239,80 @@ describe('deploy alerting scripts', () => {
     expect((JSON.parse(line2!) as { channel?: string }).channel, 'a single-quoted channel too').toBe('C0123ABCD')
   })
 
+  /**
+   * Shims for systemd. journalctl answers differently depending on whether it was filtered by
+   * invocation, which is exactly the distinction under test.
+   */
+  function systemdShim(dir: string): string {
+    const shim = join(dir, 'shim')
+    mkdirSync(shim, { recursive: true })
+    writeFileSync(
+      join(shim, 'journalctl'),
+      [
+        '#!/usr/bin/env bash',
+        'for a in "$@"; do case "$a" in _SYSTEMD_INVOCATION_ID=*)',
+        '  printf \'%s\\n\' "output of the failing run"; exit 0;; esac; done',
+        'printf \'%s\\n\' "an OLDER failing run" "a LATER successful run"',
+        '',
+      ].join('\n'),
+    )
+    writeFileSync(
+      join(shim, 'systemctl'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *InvocationID*) echo abc123 ;;',
+        '  *Result*) echo failed ;;',
+        '  *ExecMainStatus*) echo 1 ;;',
+        'esac',
+        '',
+      ].join('\n'),
+    )
+    chmodSync(join(shim, 'journalctl'), 0o755)
+    chmodSync(join(shim, 'systemctl'), 0o755)
+    return shim.replace(/\\/g, '/')
+  }
+
+  function dryRunPayload(dir: string, extraEnv: Record<string, string> = {}): { text: string } {
+    const r = run(
+      notifier,
+      ['fedbench-backup.service'],
+      { FEDBENCH_ALERT_DRY_RUN: '1', FEDBENCH_STATE_DIR: dir.replace(/\\/g, '/'), ...extraEnv },
+      systemdShim(dir),
+    )
+    const line = (r.stderr + r.stdout).split('\n').find((l) => l.trimStart().startsWith('{'))
+    expect(line, `no payload printed; stderr was: ${r.stderr}`).toBeTruthy()
+    return JSON.parse(line!) as { text: string }
+  }
+
+  it.runIf(BASH)('quotes the failing run, not the last 20 lines the unit ever logged', () => {
+    // `journalctl -u NAME -n 20` returns the unit's recent output, which for a nightly job splices
+    // the failing run together with earlier successful ones. The first real message this alerter
+    // sent did exactly that: a failure and a later success in one block under a heading that said
+    // "failed". Worse than no detail, because it invites a conclusion about the wrong run.
+    const dir = mkdtempSync(join(tmpdir(), 'fedinv-'))
+    const parsed = dryRunPayload(dir)
+    expect(parsed.text, 'the tail must come from the failing invocation').toContain('output of the failing run')
+    expect(parsed.text, 'a LATER successful run must not appear in a failure alert').not.toContain(
+      'a LATER successful run',
+    )
+    expect(parsed.text).not.toContain('an OLDER failing run')
+  })
+
+  it.runIf(BASH)('announces a test alert as a test', () => {
+    // A test indistinguishable from a real alert teaches people to ignore the channel, which is the
+    // only asset this mechanism has.
+    const dir = mkdtempSync(join(tmpdir(), 'fedtest-'))
+    const real = dryRunPayload(dir)
+    const test = dryRunPayload(dir, { FEDBENCH_ALERT_TEST: '1' })
+    expect(real.text, 'a real alert says a job failed').toMatch(/job failed/i)
+    expect(test.text, 'a test alert must say so').toMatch(/TEST ALERT/)
+    expect(test.text, 'and must not claim something failed').not.toMatch(/job failed/i)
+    // Still a real delivery through the real credential: same unit, same detail.
+    expect(test.text).toContain('fedbench-backup.service')
+    expect(test.text).toContain('output of the failing run')
+  })
+
   it('never passes the webhook as a command-line argument', () => {
     // ps is world-readable and this host has other human accounts on it (fedci, the shared EDA
     // users). A Slack webhook is a bearer credential: whoever reads it can post as this alerter.

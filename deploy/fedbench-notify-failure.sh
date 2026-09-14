@@ -93,8 +93,26 @@ fi
 host=$(hostname -s 2>/dev/null || echo unknown)
 result=$(systemctl show -p Result --value "$UNIT" 2>/dev/null)
 status=$(systemctl show -p ExecMainStatus --value "$UNIT" 2>/dev/null)
+# THE INVOCATION, not the unit. `journalctl -u NAME -n 20` returns the last 20 lines the UNIT
+# ever logged, which for a job that runs nightly splices the failing run together with earlier
+# successful ones. The first real message this alerter sent showed exactly that: a failure and a
+# later success in one block, under a heading that said "failed" -- unreadable at 02:20 and worse
+# than no detail, because it invites the wrong conclusion about which run broke.
+#
+# Every systemd job has an InvocationID that identifies one run. Filtering on it is what makes the
+# tail belong to the failure being reported. The unit-wide read stays as a fallback for the case
+# where the ID is unavailable -- some detail beats none, and an empty message helps nobody.
 # -o cat drops the syslog prefix; the unit name is already in the message heading.
-journal=$(journalctl -u "$UNIT" -n 20 --no-pager -o cat 2>/dev/null)
+journal=""
+invocation=$(systemctl show -p InvocationID --value "$UNIT" 2>/dev/null)
+if [ -n "$invocation" ]; then
+  journal=$(journalctl "_SYSTEMD_INVOCATION_ID=$invocation" -n 30 --no-pager -o cat 2>/dev/null)
+fi
+if [ -z "$journal" ]; then
+  journal=$(journalctl -u "$UNIT" -n 20 --no-pager -o cat 2>/dev/null)
+  [ -n "$journal" ] && journal="(could not isolate this run; showing recent unit output)
+$journal"
+fi
 [ -n "$journal" ] || journal="(no journal output for $UNIT)"
 
 # ── Build the payload with a JSON encoder, never with string concatenation ─────────────────────
@@ -108,10 +126,16 @@ trap 'rm -f "$payload" "$config" "$body"' EXIT
 
 FEDBENCH_HOST="$host" FEDBENCH_UNIT="$UNIT" FEDBENCH_RESULT="${result:-unknown}" \
 FEDBENCH_STATUS="${status:-unknown}" FEDBENCH_JOURNAL="$journal" \
-FEDBENCH_CHANNEL="$SLACK_CHANNEL" FEDBENCH_MODE="$MODE" \
+FEDBENCH_CHANNEL="$SLACK_CHANNEL" FEDBENCH_MODE="$MODE" FEDBENCH_TEST="${FEDBENCH_ALERT_TEST:-0}" \
 python3 -c '
 import json, os
-text = "*fedbench job failed on {host}*\n`{unit}`  result=`{result}`  exit=`{status}`".format(
+# A test alert that is indistinguishable from a real one teaches people to ignore the channel,
+# which is the only asset this mechanism has. It says so in the first line, where it cannot be
+# missed, and it is still a real end-to-end delivery through the real credential.
+heading = "*fedbench job failed on {host}*" if os.environ.get("FEDBENCH_TEST") != "1" else (
+    ":test_tube: *TEST ALERT from fedbench on {host}* -- nothing is wrong; this proves delivery works"
+)
+text = (heading + "\n`{unit}`  result=`{result}`  exit=`{status}`").format(
     host=os.environ["FEDBENCH_HOST"],
     unit=os.environ["FEDBENCH_UNIT"],
     result=os.environ["FEDBENCH_RESULT"],

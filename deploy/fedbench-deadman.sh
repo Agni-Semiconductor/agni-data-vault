@@ -26,6 +26,15 @@ REPO=${FEDBENCH_REPO:-/srv/agni-data-vault}
 # than none because it looks like coverage.
 DUMP_MAX_HOURS=${FEDBENCH_DUMP_MAX_HOURS:-36}
 DRILL_MAX_DAYS=${FEDBENCH_DRILL_MAX_DAYS:-10}
+# An absolute floor only catches a dump that is empty-empty. It CANNOT judge whether a dump is
+# "big enough": this database is 10 MB of seeded vocabulary today and will be several GB once the
+# bench data lands, so any constant is wrong on one side of that transition. This one shipped at
+# 200000 and alarmed on the first healthy run, at 189723 bytes.
+DUMP_MIN_BYTES=${FEDBENCH_DUMP_MIN_BYTES:-20000}
+# The real signal is RELATIVE: a dump that collapses against its own predecessor. That is what an
+# RLS regression, a dropped schema, or a stray --schema-only actually looks like, and it
+# self-calibrates as the database grows.
+DUMP_SHRINK_PCT=${FEDBENCH_DUMP_SHRINK_PCT:-50}
 
 [ -r "$ENVFILE" ] && . "$ENVFILE"
 
@@ -62,12 +71,33 @@ else
         okline "newest dump is ${age_h}h old"
       fi
       # A dump that exists but is tiny is the RLS failure mode: schema with no rows restores
-      # cleanly and proves nothing. 200 KB is far below the seeded floor and far above empty.
+      # cleanly and proves nothing. Two checks, because they answer different questions.
       size=$(stat -c %s "$newest" 2>/dev/null || echo 0)
-      if [ "$size" -lt 200000 ]; then
-        note "newest dump $newest is only ${size} bytes -- suspiciously small for a populated database"
+      if [ "$size" -lt "$DUMP_MIN_BYTES" ]; then
+        note "newest dump $newest is only ${size} bytes -- at or below empty"
       else
         okline "newest dump is ${size} bytes"
+      fi
+      # The one that actually catches a regression: compare against the PREVIOUS dump. A backup
+      # that was fine yesterday and is a fraction of the size today is the shape of every silent
+      # data-loss failure here -- and unlike a constant, this keeps working when the database
+      # grows by three orders of magnitude.
+      previous=$(find "$BACKUPS" -maxdepth 1 -name '*.dump' -printf '%T@ %p\n' 2>/dev/null \
+                 | sort -nr | awk 'NR == 2 { print $2 }')
+      if [ -z "$previous" ]; then
+        okline "only one dump present; no predecessor to compare against yet"
+      else
+        psize=$(stat -c %s "$previous" 2>/dev/null || echo 0)
+        if [ "$psize" -le 0 ]; then
+          note "previous dump $previous has no readable size"
+        else
+          pct=$((size * 100 / psize))
+          if [ "$pct" -lt "$DUMP_SHRINK_PCT" ]; then
+            note "newest dump is ${pct}% of the previous one (${size} vs ${psize} bytes) -- a collapse this large is data loss until proven otherwise"
+          else
+            okline "newest dump is ${pct}% of the previous one"
+          fi
+        fi
       fi
       ;;
   esac

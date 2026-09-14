@@ -4,7 +4,7 @@
 // this work -- a backup failing three nights unnoticed -- was invisible to every source-text check
 // anyone would have written.
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, chmodSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -311,6 +311,65 @@ describe('deploy alerting scripts', () => {
     // Still a real delivery through the real credential: same unit, same detail.
     expect(test.text).toContain('fedbench-backup.service')
     expect(test.text).toContain('output of the failing run')
+  })
+
+  /** A backups directory holding dumps of the given sizes, newest last. */
+  function backupsWith(dir: string, sizes: number[]): string {
+    const backups = join(dir, 'backups')
+    mkdirSync(backups, { recursive: true })
+    const base = Date.now() - sizes.length * 86400000
+    sizes.forEach((size, index) => {
+      const file = join(backups, `fedbench-day${index}.dump`)
+      writeFileSync(file, Buffer.alloc(size, 0x41))
+      const when = new Date(base + index * 86400000)
+      utimesSync(file, when, when)
+    })
+    return backups.replace(/\\/g, '/')
+  }
+
+  function deadmanOutput(dir: string, backups: string): string {
+    const state = join(dir, 'state')
+    mkdirSync(state, { recursive: true })
+    writeFileSync(join(state, 'last-drill-success'), String(Math.floor(Date.now() / 1000)))
+    const r = run(deadman, [], {
+      FEDBENCH_BACKUPS: backups,
+      FEDBENCH_STATE_DIR: state.replace(/\\/g, '/'),
+      FEDBENCH_ALERT_ENV: join(dir, 'none.env').replace(/\\/g, '/'),
+      FEDBENCH_REPO: join(dir, 'no-repo').replace(/\\/g, '/'),
+    })
+    return r.stdout
+  }
+
+  it.runIf(BASH)('does not alarm on a small dump that is simply a small database', () => {
+    // The floor this check shipped with was 200000 bytes, chosen from nothing, with a comment
+    // calling it "far below the seeded floor". The first healthy run produced 189723 bytes and it
+    // alarmed -- which would have posted a false alarm the next morning. An alarm that fires on a
+    // healthy system gets muted, and a muted alarm is worse than none because it still looks like
+    // coverage. The real database is 10 MB of vocabulary today and will be several GB after the
+    // bench data lands, so NO constant is right on both sides of that.
+    const dir = mkdtempSync(join(tmpdir(), 'feddump-'))
+    const out = deadmanOutput(dir, backupsWith(dir, [189_000, 189_723]))
+    expect(out, 'a stable small dump is not a finding').not.toMatch(/FINDING:[^\n]*dump[^\n]*bytes/)
+    expect(out, 'and the size is still reported').toMatch(/ok:[^\n]*189723 bytes/)
+  })
+
+  it.runIf(BASH)('alarms when a dump collapses against its predecessor', () => {
+    // The failure an absolute floor cannot see and a relative one catches at any scale: an RLS
+    // regression, a dropped schema, or a stray --schema-only leaves a dump that restores cleanly
+    // and contains almost nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'feddump-'))
+    const out = deadmanOutput(dir, backupsWith(dir, [4_000_000, 190_000]))
+    expect(out, 'a collapse against yesterday must be a finding').toMatch(
+      /FINDING:[^\n]*% of the previous one/,
+    )
+  })
+
+  it.runIf(BASH)('does not alarm when a dump merely grows', () => {
+    // The control. A check that flagged every change would be the same false alarm wearing a
+    // different number.
+    const dir = mkdtempSync(join(tmpdir(), 'feddump-'))
+    const out = deadmanOutput(dir, backupsWith(dir, [190_000, 4_000_000]))
+    expect(out, 'growth is not a finding').not.toMatch(/FINDING:[^\n]*% of the previous one/)
   })
 
   it('never passes the webhook as a command-line argument', () => {

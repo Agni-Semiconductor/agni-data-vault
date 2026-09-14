@@ -94,13 +94,65 @@ The shared JWT secret was minted once and lives only in `secrets.env` on the box
 
 Regenerating it invalidates tokens already issued to callers. If PostgREST and `fed_storage` no longer use the same value, metadata reads can still work while every object download returns 401. That reads as a corrupt archive rather than a mismatched key. Losing the secret bricks the data plane; regenerating it is not recovery.
 
+## Backups And Restore
+
+`fedbench-backup.timer` starts `fedbench-backup.service` nightly at 02:20, with up to a 15-minute randomized delay. `Persistent=true` causes a missed run to be started after the next boot. The service is a `Type=oneshot` job; enable the timer, not the service, because enabling the service would run a completed backup at every boot. It runs `/usr/local/bin/backup-fedbench.sh` as the OS and PostgreSQL role `postgres`.
+
+The script uses `/usr/pgsql-17/bin/pg_dump` and `/usr/pgsql-17/bin/pg_restore`; do not use bare `psql` or `pg_dump` on `edaserver`, because bare `psql` resolves to Siemens Calibre's client. It writes temporary files, validates both results, then publishes this pair under `/srv/fedbench/backups`:
+
+```text
+fedbench-YYYY-MM-DD.dump       custom-format archive
+fedbench-YYYY-MM-DD.sql.gz     gzip-compressed plain SQL twin
+```
+
+The backup directory is `postgres:postgres` mode `0700`. Its shared parent, `/srv/fedbench`, is `root:root` mode `0755`; `postgres` must be able to traverse the parent even though `fedbackup` owns the other service directories. The script keeps 14 daily pairs by default and does not prune retention when the current pair fails.
+
+It runs as `postgres`, not `fedbackup`, for two database reasons. `fedbackup` has no privileges inside the database at all: no memberships, no table `SELECT`, and no `BYPASSRLS`, so its dump fails with `permission denied for schema vault`. Also, every `vault` table has RLS enabled with no policies, and `pg_dump` runs with `row_security=off`; the dump must therefore be made by a role that bypasses RLS. `postgres` is a superuser over peer authentication and bypasses RLS. Giving `fedbackup` those database privileges would widen the privilege of the account that owns the service data and is not the selected design.
+
+Both formats are deliberately kept. A `-Fc` archive is efficient and is the format to inspect or restore with `pg_restore`, but it needs a matching-or-newer `pg_restore` forever. The `.sql.gz` twin is readable with `zgrep`, readable by a human, and loadable by any future PostgreSQL, so losing an old restore binary does not turn an otherwise present archive into an unreadable recovery point.
+
+These are local dumps on the database's own host. They are not an off-host copy, not a second physical copy, and they do not clear the cutover gate. The hosted Supabase projects are the only off-host copy until cutover; after cutover they are not an off-host copy either. This remains the open risk: the backup failed three nights running before anyone noticed, and nothing currently alerts on it.
+
+### Check A Run
+
+Use the timer and service state, then inspect the journal and the dated pair. A successful run must publish both files, not merely start the service:
+
+```bash
+sudo systemctl list-timers --all fedbench-backup.timer
+sudo systemctl status fedbench-backup.timer fedbench-backup.service --no-pager
+sudo journalctl -u fedbench-backup.service -n 80 --no-pager
+sudo ls -l /srv/fedbench/backups
+sudo /usr/pgsql-17/bin/pg_restore --list /srv/fedbench/backups/fedbench-YYYY-MM-DD.dump
+sudo gzip -t /srv/fedbench/backups/fedbench-YYYY-MM-DD.sql.gz
+```
+
+The journal summary must say that both verified files were published. The `pg_restore --list` and `gzip -t` checks test that the files are readable, not just that they exist. A fixed unit does not clear a previous failed state: the next successful run clears it, or use `sudo systemctl reset-failed fedbench-backup.service` after investigating the failure.
+
+### Restore
+
+Restore only into the intended `fedbench` database after deciding whether the operation should replace existing objects. The custom archive requires a matching-or-newer PostgreSQL `pg_restore`; the SQL twin uses the explicit PostgreSQL 17 client:
+
+```bash
+# Custom archive: inspect first, then restore according to the recovery plan.
+sudo -u postgres /usr/pgsql-17/bin/pg_restore --list /srv/fedbench/backups/fedbench-YYYY-MM-DD.dump
+sudo -u postgres /usr/pgsql-17/bin/pg_restore -d fedbench /srv/fedbench/backups/fedbench-YYYY-MM-DD.dump
+
+# Plain SQL twin: stream the readable form into PostgreSQL.
+sudo -u postgres bash -o pipefail -c 'gzip -dc /srv/fedbench/backups/fedbench-YYYY-MM-DD.sql.gz | /usr/pgsql-17/bin/psql -d fedbench'
+```
+
+Do not run both restore commands for one recovery attempt: they are two representations of the same dump. Confirm the restored schema and seeded counts with the health check and the explicit PostgreSQL client; a successful client exit alone does not prove that the data-plane role can read RLS-protected tables.
+
+### Backup Symptoms
+
+| What you see | What it means | Fastest check |
+|---|---|---|
+| `status=203/EXEC` | systemd could not `EXEC` the script; the script did not run and did not error. The unit pointed into a service account's home, labelled `user_home_t`, which cannot be executed. | Check `ExecStart` with `sudo systemctl cat fedbench-backup.service`; it must point to `/usr/local/bin/backup-fedbench.sh`, then check recent AVCs with `sudo ausearch -m avc -ts recent`. |
+| Service exits `1` in about 5 ms with no output | The service user could not traverse the parent of the backup directory. The failure occurs before the dump and can look like a database failure because `mktemp` names a path inside the unreachable directory. | Run `namei -l /srv/fedbench/backups`; it shows every path component's modes and is the fastest diagnosis. |
+| `permission denied for schema vault` | The dump is being made by a role with no database privileges. An existing OS account is not evidence that its PostgreSQL role can dump. | Run the probe as the configured service user: `sudo -u postgres /usr/pgsql-17/bin/psql -d fedbench -c 'set row_security = off; select count(*) from vault.field_definitions;'`; verify the unit says `User=postgres`. |
+
 ## Not Covered Yet
 
-Do not improvise these operations:
+Do not improvise the public door. It is not part of the current live endpoint. Ad hoc changes can expose the tailnet-only data plane.
 
-- Backups of the new database.
-- The public door.
-
-They are not part of the current live endpoint. Ad hoc changes to either can expose the tailnet-only data plane or create an unproven recovery process.
-
-Changed only `docs/ENDPOINT_RUNBOOK.md` to record the live `vault-api`, its Caddy routing, health-count semantics, restart and reboot checks, and the four new operational failure shapes. Deliberately did not change deployment scripts, service configuration, endpoint code, or other documentation because this task is limited to this runbook and no facts were provided that require changes outside it.
+Changed only `docs/ENDPOINT_RUNBOOK.md` to add the live backup schedule, execution identity, local-dump limits, format rationale, checks, restore paths, open alerting risk, and the three observed backup failure shapes. Deliberately did not change deployment scripts, service configuration, endpoint code, or other documentation because this task is limited to this runbook and the deployment sources already contain the intended configuration.

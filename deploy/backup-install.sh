@@ -142,8 +142,34 @@ step "1. Backup directory"
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # Root creates this once for the timer account. Leaving it root-owned makes nightly runs fail in
 # pg_dump's output phase, which reads as a database permission problem rather than a directory bug.
+# THE PARENT MUST BE TRAVERSABLE BY THE SERVICE USER, and this is not implied by creating the
+# child correctly. /srv/fedbench was created 0750 fedbackup:fedbackup by root-install.sh, so
+# postgres -- which is in no group but its own -- could not traverse it. The backup died in 5ms
+# with exit 1: mktemp failing inside a directory it could not reach. The message named the
+# temporary file, not the parent three levels up.
+#
+# It is a SHARED parent: objects/ and venv/ belong to fedbackup, backups/ to postgres. Owning it as
+# one tenant was the error. root:root 0755 with each child keeping its own mode exposes nothing --
+# only the child names are listable, and their contents keep 0750 and 0700 respectively.
+parent=$(dirname "$BACKUPDIR")
+pmode=$(stat -c '%a %U' "$parent" 2>/dev/null)
+case "$pmode" in
+  *7[0-4][0-4]*|*[0-7][0-7]0*)
+    chmod 0755 "$parent" && chown root:root "$parent" \
+      && ok "made $parent traversable (root:root 0755 -- it is shared by $SERVICE_USER and fedbackup)" ;;
+  *) ok "$parent is $pmode" ;;
+esac
+
 if install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$BACKUPDIR"; then
   ok "created $BACKUPDIR ($SERVICE_USER:$SERVICE_USER 0700)"
+  # PROVE IT, as the service user. Creating the directory says nothing about whether the account
+  # that will use it can get there -- which is the whole failure above.
+  if runuser -u "$SERVICE_USER" -- test -w "$BACKUPDIR" 2>/dev/null; then
+    ok "  $SERVICE_USER can write $BACKUPDIR"
+  else
+    bad "  $SERVICE_USER cannot write $BACKUPDIR -- check every directory on the path, not just this one"
+    namei -l "$BACKUPDIR" 2>/dev/null | sed 's/^/      /'
+  fi
 else
   bad "could not create $BACKUPDIR for $SERVICE_USER"
 fi

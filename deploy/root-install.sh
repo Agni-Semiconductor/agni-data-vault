@@ -303,7 +303,17 @@ step "2. The live object root — which is NOT the archive"
 # /srv/nextcloud/fedbench/objects is the nightly COLD ARCHIVE, on a single 7.3 T disk with no
 # redundancy. Serving it live would make the archive and the primary the same directory, and then
 # a bug in the writer damages the only copy. The live store goes on `/`, which is RAID1.
-install -d -m 0750 -o fedbackup -g fedbackup /srv/fedbench "$OBJROOT" && ok "created $OBJROOT (fedbackup, 0750)"
+# THE PARENT IS SHARED AND MUST NOT BE OWNED BY ONE TENANT. /srv/fedbench holds objects/ (owned
+# fedbackup), venv/ (owned fedbackup) and backups/ (owned postgres, written by the nightly dump).
+# Creating the parent 0750 fedbackup:fedbackup meant postgres could not TRAVERSE it, so
+# fedbench-backup.service died in 5ms with exit 1 -- mktemp failing in a directory it could not
+# reach. The error named the temporary file, not the parent three levels up.
+#
+# root:root 0755 on the parent, each child keeping its own mode: objects and venv stay 0750
+# fedbackup, backups stays 0700 postgres. Nothing is exposed by making the parent traversable --
+# only the three names are listable, and their contents are protected by their own modes.
+install -d -m 0755 -o root -g root /srv/fedbench && ok "created /srv/fedbench (root, 0755 -- a shared parent)"
+install -d -m 0750 -o fedbackup -g fedbackup "$OBJROOT" && ok "created $OBJROOT (fedbackup, 0750)"
 restorecon -R /srv/fedbench 2>/dev/null || true
 
 # ══════════════════════════════════════════════════════════════════════════════════════════

@@ -79,8 +79,41 @@ esac
 if [ "$DRY" -eq 1 ]; then
   printf 'dry run: would create %s as 0700 if needed, write fedbench daily dump pairs, and retain %s day(s)\n' \
     "$OUT" "$RETAIN"
+
+  # A REHEARSAL THAT SKIPS THE STEP THAT FAILS IS NOT A REHEARSAL.
+  #
+  # This reported success while the real run died in 5ms: the parent of $OUT was 0750 and owned by
+  # another service account, so this user could not traverse it, and mktemp failed inside a
+  # directory it could not reach. Writing nothing is exactly what a dry run should do -- but
+  # claiming the real run WOULD work, without checking the one thing that stopped it, is worse than
+  # not rehearsing at all, because it is believed.
+  #
+  # So: actually touch and remove a file, then report. Still writes nothing that survives.
+  dry_fail=0
+  if [ -d "$OUT" ]; then
+    probe="$OUT/.dryrun-$$"
+    if : >"$probe" 2>/dev/null; then
+      rm -f "$probe"
+      printf 'dry run: %s exists and is writable by %s\n' "$OUT" "$(id -un)"
+    else
+      printf 'dry run: FAILED -- %s exists but %s cannot write in it\n' "$OUT" "$(id -un)" >&2
+      command -v namei >/dev/null && namei -l "$OUT" >&2
+      dry_fail=1
+    fi
+  else
+    # The parent is what a real run needs in order to create $OUT at all.
+    parent=$(dirname "$OUT")
+    if [ -d "$parent" ] && [ -w "$parent" ] && [ -x "$parent" ]; then
+      printf 'dry run: %s does not exist; %s can create it under %s\n' "$OUT" "$(id -un)" "$parent"
+    else
+      printf 'dry run: FAILED -- %s does not exist and %s cannot create it under %s\n' "$OUT" "$(id -un)" "$parent" >&2
+      command -v namei >/dev/null && namei -l "$parent" >&2
+      dry_fail=1
+    fi
+  fi
+
   printf 'summary: wrote nothing; size 0 bytes; duration 0s; retention not pruned (dry run)\n'
-  exit 0
+  exit "$dry_fail"
 fi
 
 fail=0

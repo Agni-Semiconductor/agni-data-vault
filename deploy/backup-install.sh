@@ -134,6 +134,24 @@ systemctl is-enabled --quiet fedbench-backup.timer && ok "fedbench-backup.timer 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 step "3. Verify the timer can actually make a backup"
 # ══════════════════════════════════════════════════════════════════════════════════════════
+# WHAT HAPPENED ON THE PREVIOUS RUNS, surfaced rather than left in the journal.
+#
+# This unit failed three nights running with status=203/EXEC -- systemd could not exec the script,
+# because the shipped unit pointed into a service account's home. Nothing noticed. A timer is a
+# promise that something happens while nobody is watching, so the one moment anybody IS watching is
+# a re-run of this installer, and that is where a history of failure belongs.
+#
+# 203/EXEC specifically means "could not execute", not "the script returned an error". It is worth
+# naming because the two have completely different causes and the journal line looks similar.
+if systemctl is-failed --quiet fedbench-backup.service; then
+  warn "fedbench-backup.service is in a FAILED state from a previous run:"
+  systemctl status fedbench-backup.service --no-pager 2>/dev/null | sed -n '3,5p' | sed 's/^/      /'
+  warn "  a fixed unit does not clear this; the next successful run does, or: systemctl reset-failed fedbench-backup.service"
+else
+  last=$(systemctl show fedbench-backup.service -p ExecMainStatus --value 2>/dev/null)
+  [ "${last:-0}" = 0 ] && ok "no failed state recorded for fedbench-backup.service"     || warn "last run exited $last"
+fi
+
 # INSTALL THE SCRIPT WHERE THE UNIT CAN EXEC IT, and exercise THAT copy.
 #
 # The staging directory lives under /home/agnidata, which is 0700, so the service user cannot even

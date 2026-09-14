@@ -105,3 +105,22 @@ button,a { transition:color .15s ease-out,background-color .15s ease-out,border-
 @media (prefers-reduced-motion: reduce) {
   button,a { transition:none }
 }
+
+/* ── The assistant panel's entrance ───────────────────────────────────────────────────────────
+ * A slide-over that simply appears gives no sense of where it came from, and on a wide screen the
+ * eye has to hunt for what changed. 220ms on a decelerating curve is long enough to read as motion
+ * and short enough not to be something you wait through on the twentieth use.
+ *
+ * Transform and opacity only: both are composited, so this does not force layout on a page that may
+ * be rendering a 16,384-cell canvas behind the scrim.
+ */
+@keyframes ask-panel-in { from { transform: translateX(100%) } to { transform: translateX(0) } }
+@keyframes ask-scrim-in { from { opacity: 0 } to { opacity: 1 } }
+.ask-panel { animation: ask-panel-in .22s cubic-bezier(.22, 1, .36, 1) both; will-change: transform }
+.ask-scrim { animation: ask-scrim-in .22s ease-out both }
+
+/* A stated preference for less motion is a medical one for some people, not a style setting. The
+ * panel still appears; it just stops travelling. */
+@media (prefers-reduced-motion: reduce) {
+  .ask-panel, .ask-scrim { animation: none }
+}

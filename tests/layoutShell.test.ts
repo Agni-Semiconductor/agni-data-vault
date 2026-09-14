@@ -18,6 +18,9 @@ describe('app shell', () => {
     const container = /const container\s*=\s*clsx\(([\s\S]*?)\)\n/.exec(directives)
     expect(container, 'the shared container must be computed once').toBeTruthy()
     expect(container![1], 'the shared width must depend on wideMain').toMatch(/wideMain/)
+    // And it must not go back to a cap that leaves a third of a wide window empty. 1280px on a
+    // 2000px display reads as the page being cropped, which is what prompted this.
+    expect(container![1], 'max-w-7xl is too narrow for the displays this is used on').not.toMatch(/max-w-7xl/)
 
     for (const element of ['header', 'main', 'footer']) {
       const usesContainer = new RegExp(`<${element}[^>]*className=\\{clsx\\(container|<div className=\\{clsx\\(container`)
@@ -52,12 +55,14 @@ describe('app shell', () => {
     expect(nav![1], 'the nav must be allowed to shrink').toMatch(/\bmin-w-0\b/)
   })
 
-  it('does not paint the logo chip with a themed white', () => {
-    // The logo PNG is fully opaque with a baked-in white background, so it needs a real white
-    // behind it. `bg-white` is remapped to the theme surface in index.css, which would put a dark
-    // chip behind a white logo -- the literal is the point, and this pins it so a later tidy-up
-    // that "removes the arbitrary value" does not quietly break the mark.
-    expect(directives).toMatch(/bg-\[#FFFFFF\][^"]*"[\s\S]{0,200}agni-logo\.png/)
+  it('uses the keyed logo and no longer props it on a white chip', () => {
+    // The shipped agni-logo.png is RGBA but fully opaque with a baked-in white background -- all
+    // four corners #FFFFFF at alpha 255 -- so on dark it rendered as a white rectangle. The keyed
+    // asset has that white removed and its padding trimmed. The chip that made the white
+    // deliberate is gone with it, and must not come back: a white plate behind a transparent mark
+    // is the same defect wearing an explanation.
+    expect(directives).toMatch(/agni-logo-transparent\.png/)
+    expect(directives, 'the chip is obsolete now the asset is keyed').not.toMatch(/bg-\[#FFFFFF\]/)
   })
 
   it('offers the assistant and the theme control from every page', () => {

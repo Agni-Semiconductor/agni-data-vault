@@ -58,14 +58,14 @@ export default function AskSidebar() {
         <>
           {/* The scrim is a sibling, not a parent: a click target that also contains the panel
               swallows clicks meant for the panel unless every one of them stops propagation. */}
-          <div className="fixed inset-0 z-40 bg-black/30" onClick={() => setOpen(false)} aria-hidden="true" />
+          <div className="ask-scrim fixed inset-0 z-40 bg-black/40" onClick={() => setOpen(false)} aria-hidden="true" />
           <div
             ref={panelRef}
             role="dialog"
             aria-modal="true"
             aria-label="Ask the vault"
             tabIndex={-1}
-            className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-border-subtle bg-surface-1 shadow-overlay focus:outline-none"
+            className="ask-panel fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-border-subtle bg-surface-1 shadow-overlay focus:outline-none"
           >
             <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
               <h2 className="text-base">Ask the vault</h2>

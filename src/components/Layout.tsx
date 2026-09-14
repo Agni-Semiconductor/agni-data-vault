@@ -99,22 +99,25 @@ export default function Layout() {
    * header's left edge and ran past its right. That misalignment was the "offset weird" report --
    * a layout bug, not a styling preference. Whatever the width is, all three now share it.
    */
-  const container = clsx('mx-auto w-full px-6', wideMain ? 'max-w-none' : 'max-w-7xl')
+  // max-w-7xl (1280px) left roughly a third of a 2000px window empty on either side, which read
+  // as the page being cropped rather than centred. The cap is now wide enough to be invisible on a
+  // normal display and still bounded, because an unbounded line length on an ultrawide is its own
+  // readability problem; wide routes keep opting out entirely.
+  const container = clsx('mx-auto w-full px-8', wideMain ? 'max-w-none' : 'max-w-[1920px]')
 
   return (
     <div className="flex min-h-screen flex-col bg-surface-1">
       <header className="border-b border-border-subtle bg-surface-1">
         <div className={clsx(container, 'flex items-center gap-x-6 py-4')}>
           <Link to="/" className="flex shrink-0 items-center gap-3">
-            {/* The logo PNG is fully opaque with a baked-in white background -- verified: all four
-                corners are #FFFFFF at alpha 255 -- so on a dark ground it renders as a white
-                rectangle. Until there is a transparent or dark-variant asset, the white is made
-                DELIBERATE: a small padded chip reads as a badge rather than as a rendering fault.
-                bg-[#FFFFFF] is an explicit literal on purpose; `bg-white` is remapped to the theme
-                surface in index.css, which is exactly what must not happen here. */}
-            <span className="inline-flex items-center rounded-[3px] bg-[#FFFFFF] px-1.5 py-1">
-              <img src="/agni-logo.png" alt="Agni" className="h-5 w-auto" />
-            </span>
+            {/* agni-logo-transparent.png is the shipped PNG with its white background keyed out
+                and the surrounding padding trimmed. The original is composited ink on white, so
+                the alpha is its distance from white and the ink colour is recovered by removing
+                the white mixed into it; interior pixels are forced opaque so the mark does not
+                composite the page through itself on a dark ground, while edge pixels keep their
+                computed alpha and stay antialiased. The ink is orange and gold with no dark
+                pixels at all, so one asset reads correctly in both themes. */}
+            <img src="/agni-logo-transparent.png" alt="Agni" className="h-6 w-auto" />
             <span className="label-caps">DATA VAULT</span>
           </Link>
           {/* min-w-0 lets the nav shrink instead of forcing the row to wrap, which is what pushed

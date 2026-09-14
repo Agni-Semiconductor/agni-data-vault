@@ -19,6 +19,18 @@ function directives(text: string): string {
   return text.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n')
 }
 
+/**
+ * Comment-stripped text with backslash continuations JOINED, so one shell command is one line.
+ *
+ * Every per-line check below was line-bound and therefore wrong: curl's invocation spans a
+ * continuation, so `[^\n]*` could not reach its later arguments. A mutation that moved the bot
+ * token into `-H "Authorization: ..."` on the second line went UNCAUGHT by a test written
+ * specifically to forbid exactly that.
+ */
+function logicalLines(text: string): string {
+  return directives(text).replace(/\\\n\s*/g, ' ')
+}
+
 function hasBash(): boolean {
   try {
     execFileSync('bash', ['-c', 'exit 0'], { stdio: 'ignore' })
@@ -104,12 +116,145 @@ describe('deploy alerting scripts', () => {
     expect(r.stdout).toMatch(/no successful restore drill has ever been recorded/)
   })
 
+  /**
+   * A curl that answers like Slack's Web API: HTTP 200, verdict in the BODY. The shim writes
+   * whatever body the test asks for to the path curl was told to --output, and exits 0 -- exactly
+   * what the real curl does when chat.postMessage rejects a message.
+   */
+  function curlShim(dir: string, body: string): string {
+    const shim = join(dir, 'shim')
+    mkdirSync(shim, { recursive: true })
+    writeFileSync(
+      join(shim, 'curl'),
+      [
+        '#!/usr/bin/env bash',
+        'out=""; prev=""',
+        'for a in "$@"; do if [ "$prev" = "--output" ]; then out=$a; fi; prev=$a; done',
+        '[ -n "$out" ] && printf \'%s\' "$FEDBENCH_TEST_BODY" > "$out"',
+        'exit 0',
+      ].join('\n') + '\n',
+    )
+    chmodSync(join(shim, 'curl'), 0o755)
+    void body
+    return shim.replace(/\\/g, '/')
+  }
+
+  function apiEnvFile(dir: string): string {
+    const envFile = join(dir, 'alert.env')
+    writeFileSync(envFile, 'FEDBENCH_SLACK_TOKEN=xoxb-test-token\nFEDBENCH_SLACK_CHANNEL=#fedbench-alerts\n')
+    return envFile.replace(/\\/g, '/')
+  }
+
+  it.runIf(BASH)('treats Slack ok:false as a failed delivery even though the HTTP status is 200', () => {
+    // THE TRAP. chat.postMessage answers HTTP 200 for its OWN failures and puts the verdict in the
+    // body: channel_not_found, invalid_auth, not_in_channel. `curl --fail` sees 200 and reports
+    // success, so an expired token or a bot that was never invited would silence every future alert
+    // while every unit still looked wired up -- the exact failure this alerter exists to prevent.
+    const dir = mkdtempSync(join(tmpdir(), 'fedapi-'))
+    const shim = curlShim(dir, '')
+    const r = run(
+      notifier,
+      ['fedbench-backup.service'],
+      {
+        FEDBENCH_ALERT_DRY_RUN: '0',
+        FEDBENCH_ALERT_ENV: apiEnvFile(dir),
+        FEDBENCH_STATE_DIR: dir.replace(/\\/g, '/'),
+        FEDBENCH_TEST_BODY: '{"ok":false,"error":"channel_not_found"}',
+      },
+      shim,
+    )
+    expect(r.status, 'a rejected message must not report successful delivery').not.toBe(0)
+    expect(existsSync(join(dir, 'alert-delivery-failed')), 'and it must leave evidence').toBe(true)
+    expect(readFileSync(join(dir, 'alert-delivery-failed'), 'utf8')).toMatch(/channel_not_found/)
+  })
+
+  it.runIf(BASH)('accepts ok:true and clears any previous undelivered marker', () => {
+    // The control for the assertion above: if this also failed, the ok check would merely be
+    // rejecting everything, which passes the test for the wrong reason.
+    const dir = mkdtempSync(join(tmpdir(), 'fedapi-'))
+    const marker = join(dir, 'alert-delivery-failed')
+    writeFileSync(marker, 'unit=stale\n')
+    const r = run(
+      notifier,
+      ['fedbench-backup.service'],
+      {
+        FEDBENCH_ALERT_DRY_RUN: '0',
+        FEDBENCH_ALERT_ENV: apiEnvFile(dir),
+        FEDBENCH_STATE_DIR: dir.replace(/\\/g, '/'),
+        FEDBENCH_TEST_BODY: '{"ok":true,"ts":"1789401006.000100"}',
+      },
+      curlShim(dir, ''),
+    )
+    expect(r.status, `a successful post must exit 0: ${r.stderr}`).toBe(0)
+    expect(existsSync(marker), 'a successful delivery must clear the stale marker').toBe(false)
+  })
+
+  it.runIf(BASH)('reads the bench bot credentials from the testbench secrets file', () => {
+    // The bench already has a Slack bot. Referencing its secrets.env keeps the token in ONE place,
+    // so rotating it cannot leave a second stale copy quietly failing to deliver alerts nobody is
+    // watching for -- which would be this mechanism failing in exactly the way it exists to catch.
+    const dir = mkdtempSync(join(tmpdir(), 'fedcred-'))
+    const secrets = join(dir, 'secrets.env')
+    // Quoted values, as an EnvironmentFile may legitimately carry. A token that keeps its quotes
+    // authenticates as nothing, and Slack answers invalid_auth -- which reads as a revoked token.
+    writeFileSync(
+      secrets,
+      [
+        '# the testbench secrets file',
+        // BOTH quote styles, because an EnvironmentFile may carry either -- and a test that used
+        // only one passed a mutation that deleted the other stripper.
+        'FED_SLACK_BOT_TOKEN="xoxb-from-the-bench"',
+        'FED_SLACK_CHANNEL="C0123ABCD"',
+        'FED_SLACK_ENABLED=1',
+        '',
+      ].join('\n'),
+    )
+    const envFile = join(dir, 'alert.env')
+    writeFileSync(envFile, `FEDBENCH_SLACK_CREDENTIAL_FILE=${secrets.replace(/\\/g, '/')}\n`)
+
+    const r = run(notifier, ['fedbench-backup.service'], {
+      FEDBENCH_ALERT_DRY_RUN: '1',
+      FEDBENCH_ALERT_ENV: envFile.replace(/\\/g, '/'),
+      FEDBENCH_STATE_DIR: dir.replace(/\\/g, '/'),
+    })
+    expect(r.status, `dry run failed: ${r.stderr}`).toBe(0)
+    expect(r.stderr, 'the bot-token path must be selected').toMatch(/mode=api/)
+
+    const line = (r.stderr + r.stdout).split('\n').find((l) => l.trimStart().startsWith('{'))
+    const parsed = JSON.parse(line!) as { channel?: string }
+    // The quotes must be gone. This is the assertion that would have caught shipping the raw value.
+    expect(parsed.channel, 'a double-quoted channel must be unquoted').toBe('C0123ABCD')
+
+    // The same again with single quotes: both strippers must exist, and deleting either must fail.
+    writeFileSync(
+      secrets,
+      ["FED_SLACK_BOT_TOKEN='xoxb-from-the-bench'", "FED_SLACK_CHANNEL='C0123ABCD'", ''].join('\n'),
+    )
+    const r2 = run(notifier, ['fedbench-backup.service'], {
+      FEDBENCH_ALERT_DRY_RUN: '1',
+      FEDBENCH_ALERT_ENV: envFile.replace(/\\/g, '/'),
+      FEDBENCH_STATE_DIR: dir.replace(/\\/g, '/'),
+    })
+    const line2 = (r2.stderr + r2.stdout).split('\n').find((l) => l.trimStart().startsWith('{'))
+    expect((JSON.parse(line2!) as { channel?: string }).channel, 'a single-quoted channel too').toBe('C0123ABCD')
+  })
+
   it('never passes the webhook as a command-line argument', () => {
     // ps is world-readable and this host has other human accounts on it (fedci, the shared EDA
     // users). A Slack webhook is a bearer credential: whoever reads it can post as this alerter.
-    const text = directives(readFileSync(notifier, 'utf8'))
+    // logicalLines, NOT directives: curl's invocation spans a backslash continuation, and the
+    // line-bound version of this check passed a mutation that put the token in -H on line two.
+    const text = logicalLines(readFileSync(notifier, 'utf8'))
     expect(text, 'the webhook must not appear on a command line').not.toMatch(
-      /\b(?:curl|wget)\b[^\n]*\$\{?FEDBENCH_SLACK_WEBHOOK/,
+      /\b(?:curl|wget)\b[^\n]*\$\{?(?:FEDBENCH_)?SLACK_WEBHOOK/,
+    )
+    expect(text, 'nor may the bot token, which is equally a bearer credential').not.toMatch(
+      /\b(?:curl|wget)\b[^\n]*\$\{?(?:FEDBENCH_)?SLACK_TOKEN/,
+    )
+    // An Authorization header belongs in the config file curl reads, never in argv. Stated as its
+    // own rule so the next credential added here inherits it instead of re-learning it.
+    expect(text, 'no Authorization header may be passed as a curl argument').not.toMatch(
+      /\b(?:curl|wget)\b[^\n]*(?:-H|--header)\s+["']?Authorization/i,
     )
     expect(text, 'it must be passed through a file curl reads instead').toMatch(/--config/)
   })
@@ -154,8 +299,11 @@ describe('deploy alerting scripts', () => {
     // An installer that replaced a working webhook with a placeholder would disable alerting and
     // report success doing it.
     const text = directives(readFileSync(installer, 'utf8'))
-    expect(text, 'an existing webhook must be kept when none is passed').toMatch(
-      /grep -q [^\n]*FEDBENCH_SLACK_WEBHOOK[^\n]*ENVFILE|kept the existing webhook/,
+    // PROPERTY, not spelling: the previous version required the webhook-only grep and failed
+    // the moment bot-token support landed -- against an installer that preserves BOTH kinds.
+    expect(text, 'an existing credential of either kind must be kept when none is passed').toMatch(
+      /grep -q[A-Za-z]* [^\n]*FEDBENCH_SLACK_[^\n]*ENVFILE/,
     )
+    expect(text, 'and it must say so rather than silently doing nothing').toMatch(/kept the existing/)
   })
 })

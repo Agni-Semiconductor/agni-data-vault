@@ -2,8 +2,11 @@
 # Install failure alerting and the liveness check for the fedbench jobs.
 #
 #   sudo bash deploy/alerting-install.sh --check
+#   sudo bash deploy/alerting-install.sh            # reuses the testbench's Slack bot, preferred
+#   sudo bash deploy/alerting-install.sh --fedbench-secrets /path/to/secrets.env
+#   sudo bash deploy/alerting-install.sh --token xoxb-... --channel C0123ABCD   # lands in `ps`
 #   sudo bash deploy/alerting-install.sh --webhook 'https://hooks.slack.com/services/T.../B.../xxx'
-#   sudo bash deploy/alerting-install.sh                       # keeps an existing webhook
+#   sudo bash deploy/alerting-install.sh                       # keeps existing credentials
 #   sudo bash deploy/alerting-install.sh --test-alert          # POSTS to the channel (see below)
 #
 # WHAT THIS FIXES: the nightly backup failed three consecutive nights and nothing said a word. Two
@@ -30,6 +33,12 @@ DRILL_USER=postgres
 CHECK=0
 TEST_ALERT=0
 WEBHOOK=""
+TOKEN=""
+CHANNEL=""
+# The testbench's own secrets.env, which already holds FED_SLACK_BOT_TOKEN and FED_SLACK_CHANNEL.
+# Referencing it keeps the token in one place; --token copies it into a second.
+CREDFILE=${CREDFILE:-/srv/fedbackup/ferrodiode-pcb-testbench/server/config/secrets.env}
+USE_CREDFILE=0
 fail=0
 warns=0
 
@@ -45,6 +54,15 @@ while [ $# -gt 0 ]; do
     --webhook)
       [ $# -ge 2 ] || { echo "--webhook needs a URL" >&2; exit 2; }
       WEBHOOK=$2; shift 2 ;;
+    --token)
+      [ $# -ge 2 ] || { echo "--token needs a bot token (xoxb-...)" >&2; exit 2; }
+      TOKEN=$2; shift 2 ;;
+    --channel)
+      [ $# -ge 2 ] || { echo "--channel needs a channel name or ID" >&2; exit 2; }
+      CHANNEL=$2; shift 2 ;;
+    --fedbench-secrets)
+      [ $# -ge 2 ] || { echo "--fedbench-secrets needs a path to the testbench secrets.env" >&2; exit 2; }
+      CREDFILE=$2; shift 2 ;;
     --help|-h)
       sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -127,30 +145,80 @@ else
     && ok "created $STAMP ($DRILL_USER, 0644)" || bad "could not create $STAMP"
 fi
 
-step "5. The webhook"
+step "5. The Slack credential"
 install -d -m 0750 -o root -g root "$CONFDIR"
+
+# A bot token and an incoming webhook are both accepted; the token is preferred when both are
+# given, because it can be scoped and revoked per app and the channel is not baked into the secret.
+if [ -n "$TOKEN" ] || [ -n "$CHANNEL" ]; then
+  case "$TOKEN" in
+    xoxb-*|xoxp-*) : ;;
+    "")  bad "--channel was given without --token" ;;
+    *)   bad "that does not look like a Slack bot token (expected xoxb-... or xoxp-...)"; TOKEN="" ;;
+  esac
+  [ -n "$CHANNEL" ] || { bad "--token was given without --channel"; TOKEN=""; }
+fi
 if [ -n "$WEBHOOK" ]; then
   case "$WEBHOOK" in
     https://hooks.slack.com/*) : ;;
     *) bad "that does not look like a Slack webhook (expected https://hooks.slack.com/...)"; WEBHOOK="" ;;
   esac
 fi
-if [ -n "$WEBHOOK" ]; then
-  # The webhook is a bearer credential: anyone holding it can post to the channel. 0600 root, and
-  # never echoed back to the terminal or the journal.
+
+# Prefer the existing credential file over a pasted token. The testbench's own documentation is
+# explicit about why: "never pass it as a CLI flag (it would land in shell history and `ps`)".
+if [ -z "$TOKEN" ] && [ -z "$WEBHOOK" ] && [ -r "$CREDFILE" ]; then
+  found_token=$(sed -n 's/^[[:space:]]*FED_SLACK_BOT_TOKEN=//p' "$CREDFILE" | tail -1)
+  found_channel=$(sed -n 's/^[[:space:]]*FED_SLACK_CHANNEL=//p' "$CREDFILE" | tail -1)
+  if [ -n "$found_token" ] && [ -n "$found_channel" ]; then
+    USE_CREDFILE=1
+    ok "found FED_SLACK_BOT_TOKEN and FED_SLACK_CHANNEL in $CREDFILE"
+  else
+    warn "$CREDFILE is readable but defines no FED_SLACK_BOT_TOKEN/FED_SLACK_CHANNEL"
+  fi
+fi
+
+if [ "$USE_CREDFILE" = 1 ]; then
+  # Store the REFERENCE, not the secret. One place to rotate; no second copy to go stale and fail
+  # to deliver alerts nobody is watching for.
+  umask 077
+  printf '# Written by alerting-install.sh. Points at the testbench credentials rather than\n' >"$ENVFILE"
+  printf '# copying them, so rotating the bot token is a one-file change.\n' >>"$ENVFILE"
+  printf 'FEDBENCH_SLACK_CREDENTIAL_FILE=%s\n' "$CREDFILE" >>"$ENVFILE"
+  printf 'FEDBENCH_REPO=%s\n' "$(dirname "$UNITSRC")" >>"$ENVFILE"
+  umask 022
+  chmod 0600 "$ENVFILE"; chown root:root "$ENVFILE"
+  ok "wrote $ENVFILE (0600 root): references $CREDFILE"
+  case "$found_channel" in
+    C*|G*) ok "channel $found_channel is an ID, which survives a channel rename" ;;
+    *)     warn "channel '$found_channel' is a name, not an ID -- renaming the channel breaks it" ;;
+  esac
+elif [ -n "$TOKEN" ] && [ -n "$CHANNEL" ]; then
+  # A bearer credential: anyone holding it can post as this bot. 0600 root, and never echoed back
+  # to the terminal or written to the journal.
+  umask 077
+  printf '# Written by alerting-install.sh. These are bearer credentials: keep this file 0600.\n' >"$ENVFILE"
+  printf 'FEDBENCH_SLACK_TOKEN=%s\n' "$TOKEN" >>"$ENVFILE"
+  printf 'FEDBENCH_SLACK_CHANNEL=%s\n' "$CHANNEL" >>"$ENVFILE"
+  printf 'FEDBENCH_REPO=%s\n' "$(dirname "$UNITSRC")" >>"$ENVFILE"
+  umask 022
+  chmod 0600 "$ENVFILE"; chown root:root "$ENVFILE"
+  # The token itself is never printed. Its shape is, so a paste that lost characters is visible.
+  ok "wrote $ENVFILE (0600 root): bot token ${#TOKEN} chars, channel $CHANNEL"
+elif [ -n "$WEBHOOK" ]; then
   umask 077
   printf '# Written by alerting-install.sh. A Slack webhook is a bearer credential: keep this 0600.\n' >"$ENVFILE"
   printf 'FEDBENCH_SLACK_WEBHOOK=%s\n' "$WEBHOOK" >>"$ENVFILE"
   printf 'FEDBENCH_REPO=%s\n' "$(dirname "$UNITSRC")" >>"$ENVFILE"
   umask 022
   chmod 0600 "$ENVFILE"; chown root:root "$ENVFILE"
-  ok "wrote $ENVFILE (0600 root)"
-elif [ -r "$ENVFILE" ] && grep -q '^FEDBENCH_SLACK_WEBHOOK=.\+' "$ENVFILE"; then
+  ok "wrote $ENVFILE (0600 root): incoming webhook"
+elif [ -r "$ENVFILE" ] && grep -qE '^FEDBENCH_SLACK_(TOKEN|WEBHOOK|CREDENTIAL_FILE)=.+' "$ENVFILE"; then
   # NEVER rewrite a credential this run did not receive. An installer that silently replaced a
-  # working webhook with a placeholder would disable alerting while reporting success.
-  ok "kept the existing webhook in $ENVFILE"
+  # working token with a placeholder would disable alerting while reporting success.
+  ok "kept the existing Slack credential in $ENVFILE"
 else
-  warn "no webhook configured -- alerts will be marked undelivered until you pass --webhook"
+  warn "no Slack credential configured -- alerts will be marked undelivered until you pass --token/--channel or --webhook"
 fi
 
 step "6. Install the units and wire OnFailure= onto the backup"
@@ -242,3 +310,4 @@ if [ "$fail" -gt 0 ]; then
 fi
 printf '\n\033[32mVERDICT: alerting installed (%d warn(s)).\033[0m\n' "$warns"
 printf 'Verify the path end to end with: sudo bash %s --test-alert\n' "$0"
+printf 'A bot token must also be INVITED to the channel: /invite @your-bot in %s\n' "${CHANNEL:-the target channel}"

@@ -162,6 +162,33 @@ describe('deploy scripts carry no character that fails as something else', () =>
     expect(offenders, 'a control byte in a script is invisible in an editor, a diff and a grep').toEqual([])
   })
 
+  it('no stray control bytes in any TEST file either', () => {
+    // The scan above covers deploy/ only, which is how a literal 0x08 sat inside a live regex in
+    // tests/restoreDrill.test.ts for hours:
+    //
+    //     .not.toMatch(/\w+=\(\s*(?:field_definitions|samples|captures)<0x08>/)
+    //
+    // It was written as a word boundary and arrived as a backspace. A pattern containing a byte
+    // the subject never contains cannot match -- so that `not.toMatch` ALWAYS PASSED, and an
+    // assertion added specifically to forbid a hardcoded table list forbade nothing. A check that
+    // cannot fail is indistinguishable from a check that is working, which is the whole reason
+    // this family of tests exists. Tests are exactly as vulnerable as scripts and are worth less
+    // when broken, because a broken script is usually loud.
+    const allowed = new Set([9, 10, 13])
+    const testDir = resolve(process.cwd(), 'tests')
+    const offenders = readdirSync(testDir)
+      .filter((f) => f.endsWith('.ts'))
+      .flatMap((f) => {
+        const bytes = readFileSync(resolve(testDir, f))
+        const found = new Set<number>()
+        for (const b of bytes) if (b < 32 && !allowed.has(b)) found.add(b)
+        return found.size
+          ? [`tests/${f}: ${[...found].map((b) => '0x' + b.toString(16).padStart(2, '0')).join(', ')}`]
+          : []
+      })
+    expect(offenders, 'a control byte in a test is invisible and can silently disarm an assertion').toEqual([])
+  })
+
   it('the control-byte detector still fires', () => {
     // Pinned against the real byte that caused it, so a narrowing cannot quietly exempt it.
     const withSoh = Buffer.from([0x73, 0x2f, 0x78, 0x2f, 0x01, 0x2f, 0x70])

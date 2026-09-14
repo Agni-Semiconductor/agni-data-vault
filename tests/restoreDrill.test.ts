@@ -194,7 +194,7 @@ describe('deploy/restore-drill.sh safeguards', () => {
     expect(directives(script), 'the comparison must iterate a set built at run time')
       .toMatch(/for\s+\w+\s+in\s+"\$\{!\w+\[@\]\}"/)
     expect(directives(script), 'no literal table-name list may drive the comparison')
-      .not.toMatch(/\w+=\(\s*(?:field_definitions|samples|measurements|captures)/)
+      .not.toMatch(/\w+=\(\s*(?:field_definitions|samples|measurements|captures)\b/)
   })
 
   it('refuses to certify a restore when the live database is too empty to prove anything', () => {

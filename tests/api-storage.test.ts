@@ -24,7 +24,7 @@ describe('storage path helpers', () => {
 
 // Moved here from tests/api-client.test.ts when parseFilenameClient and kindFromName were
 // deleted. Those browser twins had DRIFTED from these server copies (Unicode vs ASCII
-// filename cleaning, and the server additionally matches bare dc / ac / c-v), which
+// filename cleaning, and the server additionally matches bare \bdc\b / \bac\b / c-v), which
 // is why the duplication was removed rather than kept in sync. The coverage moves with them.
 describe('filename detection (formerly duplicated in the browser client)', () => {
   it('detects PUND', () => expect(parseFilename('20-PUND-3.xlsx').detected_kind).toBe('pund'));

@@ -29,6 +29,10 @@ CONFDIR=/etc/fedbench
 ENVFILE="$CONFDIR/alert.env"
 STATEDIR=/var/lib/fedbench
 DRILL_USER=postgres
+# The liveness probe needs no privilege beyond reaching 127.0.0.1 and writing its own state, so it
+# runs as the existing nologin account that owns the API it probes. systemd creates its state
+# directory via StateDirectory=, so there is nothing to chown here.
+PROBE_USER=vaultsvc
 
 CHECK=0
 TEST_ALERT=0
@@ -71,8 +75,8 @@ done
 
 [ "$(id -u)" = "0" ] || { echo "run as root (sudo bash $0 ...)" >&2; exit 2; }
 
-SCRIPTS="fedbench-notify-failure.sh fedbench-deadman.sh restore-drill.sh"
-UNITS="fedbench-alert@.service fedbench-restore-drill.service fedbench-restore-drill.timer fedbench-deadman.service fedbench-deadman.timer"
+SCRIPTS="fedbench-notify-failure.sh fedbench-deadman.sh restore-drill.sh fedbench-healthz.sh"
+UNITS="fedbench-alert@.service fedbench-restore-drill.service fedbench-restore-drill.timer fedbench-deadman.service fedbench-deadman.timer fedbench-healthz.service fedbench-healthz.timer"
 
 step "1. Assertions -- the sources, the tools, and the account this runs as"
 for f in $SCRIPTS $UNITS; do
@@ -85,6 +89,10 @@ done
 
 # The drill unit runs as postgres and the drill switches to postgres itself when run as root.
 id "$DRILL_USER" >/dev/null 2>&1 && ok "$DRILL_USER exists" || bad "$DRILL_USER does not exist"
+# The liveness probe runs as vaultsvc. ASSERT IT: a unit naming an account that does not exist
+# fails at start with 217/USER, which reads as a broken unit file rather than a missing account --
+# and the unit shipped for this probe originally named a `fedbench` account that never existed here.
+id "$PROBE_USER" >/dev/null 2>&1 && ok "$PROBE_USER exists" || bad "$PROBE_USER does not exist"
 
 # A unit that names a script it may not execute reports 203/EXEC, which reads as a missing file.
 # Assert the label rule rather than discovering it at 03:40 on a Sunday.
@@ -244,7 +252,7 @@ systemctl daemon-reload && ok "daemon-reload" || bad "daemon-reload failed"
 step "7. Enable the TIMERS -- never the services"
 # Enabling a completed oneshot runs it at every boot. The timers carry [Install]; the services
 # deliberately do not.
-for t in fedbench-restore-drill.timer fedbench-deadman.timer; do
+for t in fedbench-restore-drill.timer fedbench-deadman.timer fedbench-healthz.timer; do
   systemctl enable --now "$t" >/dev/null 2>&1 && ok "enabled and started $t" || bad "could not enable $t"
 done
 
@@ -258,7 +266,7 @@ case "$merged" in
   *)                 bad "fedbench-backup.service has OnFailure='$merged' -- the drop-in is not in effect" ;;
 esac
 
-for t in fedbench-restore-drill.timer fedbench-deadman.timer; do
+for t in fedbench-restore-drill.timer fedbench-deadman.timer fedbench-healthz.timer; do
   e=$(systemctl is-enabled "$t" 2>/dev/null); a=$(systemctl is-active "$t" 2>/dev/null)
   if [ "$e" = enabled ] && [ "$a" = active ]; then
     ok "$t is enabled and active; next run $(systemctl show -p NextElapseUSecRealtime --value "$t" 2>/dev/null)"
@@ -269,7 +277,7 @@ done
 
 # The services must NOT be enabled, or a reboot runs a restore drill and a liveness check on the
 # way up, before the database is necessarily ready.
-for s in fedbench-restore-drill.service fedbench-deadman.service fedbench-alert@.service; do
+for s in fedbench-restore-drill.service fedbench-deadman.service fedbench-alert@.service fedbench-healthz.service; do
   e=$(systemctl is-enabled "$s" 2>/dev/null)
   case "$e" in
     enabled) bad "$s is enabled -- it must be triggered, not enabled" ;;

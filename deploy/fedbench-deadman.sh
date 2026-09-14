@@ -135,9 +135,21 @@ fi
 # ── 4. Are the timers still armed? ────────────────────────────────────────────────────────────
 # The check OnFailure= structurally cannot do. A disabled timer produces no failure, no journal
 # line, and no output of any kind -- it simply stops, and everything downstream keeps looking fine.
-for timer in fedbench-backup.timer fedbench-restore-drill.timer; do
+# Two lists, because "not installed" means different things. A missing backup timer is a
+# catastrophe; a missing off-host timer just means the destination has not been configured yet,
+# and reporting that daily would be a false alarm on a healthy box -- which gets the alert muted,
+# and a muted alert is worse than none because it still looks like coverage.
+#
+# The rule that applies to BOTH: a timer that IS installed must be armed. An installed-but-disabled
+# timer is the silent failure this check exists for, whichever list it is in.
+REQUIRED_TIMERS="fedbench-backup.timer fedbench-restore-drill.timer"
+OPTIONAL_TIMERS="fedbench-healthz.timer fedbench-offhost.timer"
+for timer in $REQUIRED_TIMERS $OPTIONAL_TIMERS; do
   if ! systemctl list-unit-files "$timer" >/dev/null 2>&1; then
-    note "$timer is not installed on this host"
+    case " $REQUIRED_TIMERS " in
+      *" $timer "*) note "$timer is not installed on this host" ;;
+      *)            okline "$timer is not installed (optional; nothing is scheduled for it)" ;;
+    esac
     continue
   fi
   enabled=$(systemctl is-enabled "$timer" 2>/dev/null)
@@ -154,10 +166,21 @@ done
 # arbitrarily labelled tree. Copies drift, and drift is invisible: for three nights the unit named
 # a script that was not the script anyone was editing.
 if [ -d "$REPO/deploy" ]; then
-  for pair in "backup-fedbench.sh" "restore-drill.sh" "fedbench-notify-failure.sh" "fedbench-deadman.sh"; do
+  for pair in "backup-fedbench.sh" "restore-drill.sh" "fedbench-notify-failure.sh" \
+              "fedbench-deadman.sh" "fedbench-healthz.sh" "backup-offhost.sh"; do
     installed="/usr/local/bin/$pair"
     source_file="$REPO/deploy/$pair"
-    [ -e "$installed" ] || { note "$installed is missing but a unit may reference it"; continue; }
+    if [ ! -e "$installed" ]; then
+      # Not installed is only a problem if something actually tries to run it. Reporting every
+      # uninstalled script would alarm daily about the off-host copier until the NAS destination
+      # is configured -- a false alarm on a healthy box, which is how alerting gets muted.
+      if grep -rlq "ExecStart=[^\n]*$pair" /etc/systemd/system 2>/dev/null; then
+        note "$installed is missing but a unit's ExecStart names it -- that unit will fail 203/EXEC"
+      else
+        okline "$installed is not installed and no unit references it"
+      fi
+      continue
+    fi
     [ -e "$source_file" ] || continue
     if ! cmp -s "$installed" "$source_file"; then
       note "$installed differs from $source_file -- the box is running something other than the checkout"

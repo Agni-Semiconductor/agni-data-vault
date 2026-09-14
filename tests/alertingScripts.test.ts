@@ -376,6 +376,136 @@ describe('deploy alerting scripts', { timeout: 30_000 }, () => {
     expect(out, 'growth is not a finding').not.toMatch(/FINDING:[^\n]*% of the previous one/)
   })
 
+  it.runIf(BASH)('does not alarm about an optional timer that was never installed', () => {
+    // The off-host copier has no destination until the NAS is configured, and the liveness probe
+    // may not be installed on every host. Reporting those daily would alarm on a HEALTHY box --
+    // which is how an alert channel gets muted, and a muted alert is worse than none because it
+    // still looks like coverage. This is the same mistake the dump-size floor made.
+    const dir = mkdtempSync(join(tmpdir(), 'fedopt-'))
+    const backups = join(dir, 'backups')
+    mkdirSync(backups, { recursive: true })
+    writeFileSync(join(backups, 'fedbench-2026-09-14.dump'), Buffer.alloc(250_000, 0x41))
+    const state = join(dir, 'state')
+    mkdirSync(state, { recursive: true })
+    writeFileSync(join(state, 'last-drill-success'), String(Math.floor(Date.now() / 1000)))
+
+    const r = run(deadman, [], {
+      FEDBENCH_BACKUPS: backups.replace(/\\/g, '/'),
+      FEDBENCH_STATE_DIR: state.replace(/\\/g, '/'),
+      FEDBENCH_ALERT_ENV: join(dir, 'none.env').replace(/\\/g, '/'),
+      FEDBENCH_REPO: join(dir, 'no-repo').replace(/\\/g, '/'),
+    })
+
+    for (const optional of ['fedbench-offhost.timer', 'fedbench-healthz.timer']) {
+      expect(r.stdout, `${optional} must not be a finding when absent`).not.toMatch(
+        new RegExp(`FINDING:[^\\n]*${optional.replace('.', '\\.')}`),
+      )
+      expect(r.stdout, `${optional} should still be reported as absent`).toMatch(
+        new RegExp(`ok:[^\\n]*${optional.replace('.', '\\.')}[^\\n]*not installed`),
+      )
+    }
+    // THE CONTROL: the two core timers must still be findings when absent, or this exemption has
+    // simply switched the check off.
+    expect(r.stdout, 'a missing backup timer is still a finding').toMatch(
+      /FINDING:[^\n]*fedbench-backup\.timer is not installed/,
+    )
+    expect(r.stdout, 'a missing restore-drill timer is still a finding').toMatch(
+      /FINDING:[^\n]*fedbench-restore-drill\.timer is not installed/,
+    )
+  })
+
+  it.runIf(BASH)('does not alarm about an uninstalled script that no unit runs', () => {
+    // Drift detection must cover the new scripts without reporting every one that is simply not
+    // deployed yet. The condition that matters is a unit whose ExecStart names a file that is not
+    // there -- that unit fails 203/EXEC, which reads as a missing file rather than as a missing
+    // install. (This host has no /etc/systemd/system, so only the quiet branch is exercised here;
+    // the noisy branch is covered by reading the script, not by running it.)
+    const dir = mkdtempSync(join(tmpdir(), 'feddrift-'))
+    const backups = join(dir, 'backups')
+    mkdirSync(backups, { recursive: true })
+    writeFileSync(join(backups, 'fedbench-2026-09-14.dump'), Buffer.alloc(250_000, 0x41))
+    const repo = join(dir, 'repo', 'deploy')
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(join(repo, 'backup-offhost.sh'), '#!/usr/bin/env bash\n')
+
+    const r = run(deadman, [], {
+      FEDBENCH_BACKUPS: backups.replace(/\\/g, '/'),
+      FEDBENCH_STATE_DIR: join(dir, 'state').replace(/\\/g, '/'),
+      FEDBENCH_ALERT_ENV: join(dir, 'none.env').replace(/\\/g, '/'),
+      FEDBENCH_REPO: join(dir, 'repo').replace(/\\/g, '/'),
+    })
+
+    expect(r.stdout, 'an undeployed script nothing runs is not a finding').not.toMatch(
+      /FINDING:[^\n]*backup-offhost\.sh/,
+    )
+    // And the script must still consult the units before staying quiet -- silence must be a
+    // decision, not an omission.
+    expect(directives(readFileSync(deadman, 'utf8')), 'the quiet branch must be gated on unit references')
+      .toMatch(/ExecStart[^\n]*\$pair[\s\S]{0,200}?note /)
+  })
+
+  /** The unit files alerting-install.sh declares it installs, read from its own UNITS= line. */
+  function declaredUnits(): string[] {
+    const line = /^UNITS="([^"]+)"/m.exec(readFileSync(installer, 'utf8'))
+    expect(line, 'alerting-install.sh must declare the units it installs in UNITS=').toBeTruthy()
+    return line![1].split(/\s+/).filter(Boolean)
+  }
+
+  it('enables every timer it installs', () => {
+    // STRUCTURAL, so the next timer added inherits the check instead of re-learning it. An
+    // installed timer that is never enabled is the exact silent failure the liveness check exists
+    // to catch, shipped from the installer itself: the units are present, the files look right,
+    // and nothing ever fires.
+    const text = directives(readFileSync(installer, 'utf8'))
+    const timers = declaredUnits().filter((u) => u.endsWith('.timer'))
+    expect(timers.length, 'expected the installer to install at least one timer').toBeGreaterThan(0)
+    for (const timer of timers) {
+      expect(text, `${timer} is installed but never enabled`).toMatch(
+        new RegExp(`systemctl enable[\\s\\S]{0,400}?${timer.replace(/\./g, '\\.')}|${timer.replace(/\./g, '\\.')}[\\s\\S]{0,400}?systemctl enable`),
+      )
+    }
+  })
+
+  it('asserts that every account its units name actually exists', () => {
+    // A unit naming an account that does not exist fails at start with 217/USER, which reads as a
+    // broken unit file rather than a missing account -- and one of these units shipped naming a
+    // `fedbench` user that has never existed on this host. The installer is the only place that
+    // can catch it before the timer fires at 03:00.
+    const text = directives(readFileSync(installer, 'utf8'))
+    const users = new Set<string>()
+    for (const unit of declaredUnits().filter((u) => u.endsWith('.service'))) {
+      const path = resolve(process.cwd(), 'deploy', unit)
+      if (!existsSync(path)) continue
+      for (const line of directives(readFileSync(path, 'utf8')).split('\n')) {
+        const m = /^\s*User=(\S+)/.exec(line)
+        if (m && m[1] !== 'root') users.add(m[1])
+      }
+    }
+    expect(users.size, 'expected at least one non-root service account to check').toBeGreaterThan(0)
+
+    // The installer names accounts through variables (DRILL_USER=postgres, PROBE_USER=vaultsvc),
+    // so resolve its simple assignments before asking whether each account is asserted. Demanding
+    // the literal name would require a spelling the installer is right not to use.
+    const assignments = new Map<string, string>()
+    for (const line of text.split(/\r?\n/)) {
+      const m = /^([A-Z_][A-Z0-9_]*)=([A-Za-z0-9_.-]+)$/.exec(line.trim())
+      if (m) assignments.set(m[1], m[2])
+    }
+    const asserted = new Set<string>()
+    for (const m of text.matchAll(/\bid\s+"?\$\{?([A-Z_][A-Z0-9_]*)\}?"?/g)) {
+      const value = assignments.get(m[1])
+      if (value) asserted.add(value)
+    }
+    for (const m of text.matchAll(/\bid\s+"?([a-z][a-z0-9_-]*)"?/g)) asserted.add(m[1])
+
+    for (const user of users) {
+      expect(
+        asserted.has(user),
+        `alerting-install.sh installs a unit running as ${user} but never asserts that account exists`,
+      ).toBe(true)
+    }
+  })
+
   it('never passes the webhook as a command-line argument', () => {
     // ps is world-readable and this host has other human accounts on it (fedci, the shared EDA
     // users). A Slack webhook is a bearer credential: whoever reads it can post as this alerter.

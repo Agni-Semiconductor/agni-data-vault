@@ -43,7 +43,7 @@ cleanup() {
   if [ -n "$SCRATCH" ]; then
     # --force disconnects only scratch clients. Without it a failed diagnostic session leaves the
     # drill debris behind, which eventually reads as a real database someone is afraid to remove.
-    if "$DROPDB" --maintenance-db=postgres --force "$SCRATCH" >/dev/null 2>&1; then
+    if pg "$DROPDB" --maintenance-db=postgres --force "$SCRATCH" >/dev/null 2>&1; then
       ok "dropped scratch database $SCRATCH"
     else
       bad "could not drop scratch database $SCRATCH"
@@ -82,6 +82,26 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Every PostgreSQL client below needs a database superuser. Under `sudo` the OS user is root, which
+# has no Postgres role, so peer authentication fails -- and the count's `2>/dev/null` discarded that
+# message and reported "could not count live vault.field_definitions", which reads as a missing
+# table rather than as the wrong user. Switch to postgres explicitly.
+RUNAS=()
+invoking_user=$(id -un)
+if [ "$invoking_user" = postgres ]; then
+  :
+elif [ "$(id -u)" -eq 0 ]; then
+  RUNAS=(runuser -u postgres --)
+else
+  echo "restore-drill.sh needs the postgres role: run it as postgres, or as root via sudo." >&2
+  exit 2
+fi
+# Running the clients AS postgres also tests what the nightly unit needs -- that postgres can
+# traverse to the archive and execute the binaries. Asserting that as root proves nothing: root
+# reads everything, which is exactly how a directory postgres could not enter passed a root-run
+# rehearsal and then failed in 5ms at 02:00.
+pg() { "${RUNAS[@]}" "$@"; }
+
 step "1. Assertions -- select a current backup and prove the tools can use it"
 if [ -z "$DUMP" ]; then
   shopt -s nullglob
@@ -101,7 +121,7 @@ if [ -n "$DUMP" ]; then
     *.dump) SQL_GZ=${DUMP%.dump}.sql.gz ;;
     *) bad "custom archive must end in .dump: $DUMP" ;;
   esac
-  if [ -r "$DUMP" ]; then
+  if pg test -r "$DUMP"; then
     now=$(date +%s)
     modified=$(stat -c %Y "$DUMP" 2>/dev/null)
     case "$modified" in
@@ -111,7 +131,7 @@ if [ -n "$DUMP" ]; then
         ok "selected $DUMP; age ${age}s"
         ;;
     esac
-    "$PG_RESTORE" --list "$DUMP" >/dev/null 2>&1 \
+    pg "$PG_RESTORE" --list "$DUMP" >/dev/null 2>&1 \
       && ok "pg_restore can read the selected custom archive" \
       || bad "pg_restore cannot read the selected custom archive"
   else
@@ -119,14 +139,19 @@ if [ -n "$DUMP" ]; then
   fi
 fi
 
-if [ -n "$SQL_GZ" ] && [ -r "$SQL_GZ" ]; then
-  gzip -t "$SQL_GZ" && ok "gzip can read same-day SQL twin $SQL_GZ" \
+if [ -n "$SQL_GZ" ] && pg test -r "$SQL_GZ"; then
+  pg gzip -t "$SQL_GZ" && ok "gzip can read same-day SQL twin $SQL_GZ" \
     || bad "gzip cannot read same-day SQL twin $SQL_GZ"
   # gzip -t alone accepts a schema-only dump. Require COPY or INSERT data so DDL-only output does
   # not look like a usable backup after RLS or a dump option silently excluded all rows.
-  gzip -cd "$SQL_GZ" 2>/dev/null | grep -Eq '^(COPY|INSERT[[:space:]]+INTO)[[:space:]]'
+  pg gzip -cd "$SQL_GZ" 2>/dev/null | grep -Eq '^(COPY|INSERT[[:space:]]+INTO)[[:space:]]'
   payload_status=("${PIPESTATUS[@]}")
-  if [ "${payload_status[0]}" -eq 0 ] && [ "${payload_status[1]}" -eq 0 ]; then
+  # ONLY grep's status. `grep -q` exits at its first match, which closes the pipe and kills the
+  # decompressor with SIGPIPE -- status 141, every time, on an archive that is perfectly good.
+  # The previous version also required the decompressor to exit 0, so this check FAILED BECAUSE
+  # IT SUCCEEDED QUICKLY, and a larger twin made failure MORE likely rather than less. Integrity
+  # is already established by `gzip -t` above; this line asks one question: is data present.
+  if [ "${payload_status[1]}" -eq 0 ]; then
     ok "same-day SQL twin contains COPY or INSERT data"
   else
     bad "same-day SQL twin has no readable COPY or INSERT data"
@@ -138,16 +163,16 @@ fi
 for tool in "$PSQL" "$PG_RESTORE" "$CREATEDB" "$DROPDB"; do
   # Running --version asserts this account can execute the intended PostgreSQL 17 client; testing
   # only that a pathname exists lets the Siemens Calibre client win later and mislabels it a restore failure.
-  "$tool" --version >/dev/null 2>&1 && ok "can execute $tool" || bad "cannot execute $tool"
+  pg "$tool" --version >/dev/null 2>&1 && ok "can execute $tool" || bad "cannot execute $tool"
 done
 
 step "2. Assertions -- read non-empty seeded source tables"
 tables=(field_definitions option_values measurement_kinds metric_definitions)
 declare -A live_counts=()
 for table in "${tables[@]}"; do
-  count=$("$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$DB" -c "select count(*) from vault.$table" 2>/dev/null)
+  count=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$DB" -c "select count(*) from vault.$table" 2>&1 | tail -1)
   case "$count" in
-    ''|*[!0-9]*) bad "could not count live vault.$table" ;;
+    ''|*[!0-9]*) bad "could not count live vault.$table: $count" ;;
     0) bad "live vault.$table has zero rows; a zero source cannot prove a restore" ;;
     *) live_counts[$table]=$count; ok "live vault.$table has $count row(s)" ;;
   esac
@@ -180,7 +205,7 @@ esac
 if [ "$scratch_ok" -ne 1 ]; then
   bad "refusing to create scratch database name $SCRATCH because it could be $DB"
   SCRATCH=""
-elif "$CREATEDB" --maintenance-db=postgres "$SCRATCH" >/dev/null 2>&1; then
+elif pg "$CREATEDB" --maintenance-db=postgres "$SCRATCH" >/dev/null 2>&1; then
   ok "created isolated scratch database $SCRATCH"
 else
   bad "could not create scratch database $SCRATCH"
@@ -191,15 +216,15 @@ step "4. Restore and compare seeded table counts"
 if [ -n "$SCRATCH" ] && [ -r "$DUMP" ]; then
   # KEEP --exit-on-error: without it pg_restore prints "WARNING: errors ignored on restore: N" and
   # exits 0, so a scheduled exit-status check certifies a half-restored database forever.
-  if "$PG_RESTORE" --exit-on-error --no-owner --no-privileges -d "$SCRATCH" "$DUMP" >/dev/null 2>&1; then
+  if pg "$PG_RESTORE" --exit-on-error --no-owner --no-privileges -d "$SCRATCH" "$DUMP" >/dev/null 2>&1; then
     ok "pg_restore completed with --exit-on-error"
   else
     bad "pg_restore failed; scratch database was not fully restored"
   fi
   for table in "${tables[@]}"; do
-    count=$("$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$SCRATCH" -c "select count(*) from vault.$table" 2>/dev/null)
+    count=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$SCRATCH" -c "select count(*) from vault.$table" 2>&1 | tail -1)
     case "$count" in
-      ''|*[!0-9]*) bad "could not count restored vault.$table" ;;
+      ''|*[!0-9]*) bad "could not count restored vault.$table: $count" ;;
       0) bad "restored vault.$table has zero rows; schema without rows is not a backup" ;;
       "${live_counts[$table]:-missing}") ok "restored vault.$table matches live count $count" ;;
       *) bad "restored vault.$table has $count row(s), live has ${live_counts[$table]:-unknown}" ;;

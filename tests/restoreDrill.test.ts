@@ -119,6 +119,50 @@ describe('deploy/restore-drill.sh safeguards', () => {
       .toMatch(/dropdb|\$DROPDB|"\$DROPDB"/)
   })
 
+  it('runs every PostgreSQL client as the postgres role rather than as the invoking user', () => {
+    const script = readFileSync(scriptPath, 'utf8')
+    // `sudo bash restore-drill.sh` makes the OS user root, which has no Postgres role, so peer
+    // authentication fails on every client call. Observed: four `could not count live vault.<table>`
+    // lines that read as missing tables. The drill must switch to postgres -- the same account the
+    // nightly unit uses, so the drill exercises the unit's real capability rather than root's.
+    expect(directives(script), 'the drill must switch to the postgres role when invoked as root')
+      .toMatch(/runuser\s+-u\s+postgres\b/)
+
+    // AND every client invocation must actually go through that switch. A wrapper that exists while
+    // half the call sites bypass it is the same bug with a coat of paint.
+    const CLIENTS = ['PSQL', 'PG_RESTORE', 'CREATEDB', 'DROPDB']
+    const unwrapped: string[] = []
+    for (const line of directives(script).split('\n')) {
+      if (/^\s*(?:PSQL|PG_RESTORE|CREATEDB|DROPDB)=/.test(line)) continue // the path assignments
+      if (/^\s*for\s+tool\s+in\b/.test(line)) continue                   // the iteration list
+      for (const client of CLIENTS) {
+        const use = new RegExp(`"\\$${client}"`)
+        if (!use.test(line)) continue
+        // Accept `pg "$CLIENT"`, including after if/elif/while or a command substitution.
+        if (!new RegExp(`\\bpg\\s+"\\$${client}"`).test(line)) unwrapped.push(line.trim())
+      }
+    }
+    expect(unwrapped, 'these client calls bypass the postgres switch').toEqual([])
+  })
+
+  it('judges the compressed twin by the matcher, not by the decompressor it kills', () => {
+    const script = readFileSync(scriptPath, 'utf8')
+    // `grep -q` exits at its first match, closing the pipe; the decompressor then dies of SIGPIPE
+    // and reports 141. Gating on its status made this check FAIL BECAUSE IT SUCCEEDED QUICKLY -- and
+    // a larger archive, having more data, failed more reliably. Reproduced against a twin built to
+    // contain 40,000 COPY rows: gzip=141, grep=0.
+    //
+    // Integrity is already proven by the separate `gzip -t`. This check asks one question -- is
+    // there data -- so it must read the matcher's status alone.
+    expect(directives(script), 'the decompressor exit status must not gate the payload check')
+      .not.toMatch(/payload_status\[0\]/)
+    expect(directives(script), 'the payload verdict must come from the matcher in the pipeline')
+      .toMatch(/payload_status\[1\]/)
+    // And the integrity check must still exist somewhere, or dropping index 0 would lose it.
+    expect(directives(script), 'archive integrity must still be asserted on its own')
+      .toMatch(/gzip\s+-t/)
+  })
+
   it('pins PostgreSQL 17 client binaries rather than resolving them from PATH', () => {
     const script = readFileSync(scriptPath, 'utf8')
     // PATH can select Siemens Calibre clients, producing ordinary-looking output from tools that do

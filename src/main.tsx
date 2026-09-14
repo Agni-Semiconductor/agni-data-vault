@@ -3,9 +3,12 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import 'uplot/dist/uPlot.min.css'
 import App from './App.tsx'
+import { ThemeProvider } from './theme/ThemeProvider'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <ThemeProvider>
+      <App />
+    </ThemeProvider>
   </StrictMode>,
 )

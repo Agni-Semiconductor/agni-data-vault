@@ -1,11 +1,107 @@
 @import "tailwindcss";
 
+/* ── The utility layer ────────────────────────────────────────────────────────────────────────
+ * Every colour here resolves to a var() defined below, NOT to a literal. That is what makes dark
+ * mode possible without editing the ~200 call sites that already use these utilities: `text-agni-ink`,
+ * `border-border-subtle`, `bg-surface-2` and friends keep their names and change their values.
+ *
+ * `--color-white` is remapped deliberately. 66 places say `bg-white` to mean "the raised surface",
+ * and a literal white card on a dark page is the single most obvious way to get this wrong. If a
+ * future component genuinely needs paper-white regardless of theme, it must say so explicitly with
+ * an arbitrary value; `white` in this codebase means "the surface", and that is a trade made once
+ * here rather than argued at 66 call sites.
+ */
 @theme {
-  --color-agni-orange: #F15A2A; --color-agni-orange-hover: #D94A1C; --color-agni-orange-tint: #FFF4E8; --color-agni-gold: #FADA3E; --color-agni-gold-pale: #FFED99; --color-agni-crimson: #95001A; --color-agni-slate: #888894; --color-agni-ink: #000000; --color-border-subtle: #E8E8EC; --color-surface-highlight: #FDF3D2; --color-surface-accent: #FFF4E8; --color-surface-2: #F7F7F8;
-  --font-display: Cabin, sans-serif; --font-body: "IBM Plex Sans", sans-serif; --font-mono: "IBM Plex Mono", monospace;
-  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --shadow-card: 0 1px 3px rgba(0,0,0,.06); --shadow-overlay: 0 8px 24px rgba(0,0,0,.12);
+  --color-agni-orange: var(--agni-orange);
+  --color-agni-orange-hover: var(--agni-orange-hover);
+  --color-agni-orange-tint: var(--agni-orange-tint);
+  --color-agni-gold: var(--agni-gold);
+  --color-agni-gold-pale: var(--agni-gold-pale);
+  --color-agni-crimson: var(--agni-crimson);
+  --color-agni-slate: var(--text-muted);
+  --color-agni-ink: var(--text-body);
+  --color-border-subtle: var(--border-subtle);
+  --color-surface-highlight: var(--surface-highlight);
+  --color-surface-accent: var(--surface-accent);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-white: var(--surface-1);
+  --color-danger: var(--danger);
+  --color-danger-tint: var(--danger-tint);
+  --color-success: var(--success);
+  --color-info: var(--info);
+
+  --font-display: Cabin, sans-serif;
+  --font-body: "IBM Plex Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px;
+  --shadow-card: 0 1px 3px rgba(0,0,0,.06); --shadow-overlay: 0 8px 24px rgba(0,0,0,.12);
 }
-:root { color-scheme: light; --agni-orange:#F15A2A; --agni-orange-hover:#D94A1C; --agni-orange-tint:#FFF4E8; --agni-gold:#FADA3E; --agni-gold-pale:#FFED99; --agni-crimson:#95001A; --agni-slate:#888894; --agni-ink:#000; --agni-white:#FFF; --border-subtle:#E8E8EC; --surface-highlight:#FDF3D2; --surface-accent:#FFF4E8; --surface-2:#F7F7F8; --text-heading:var(--agni-crimson); --text-body:var(--agni-ink); --text-muted:var(--agni-slate); --action-primary:var(--agni-orange) }
-body { background:#fff; color:var(--text-body); font-family:var(--font-body); font-size:14px; line-height:1.5 }
+
+/* ── Light: the complete palette ──────────────────────────────────────────────────────────────
+ * Every token gets its value HERE, on bare :root. A colour whose only definition lives inside a
+ * media query or a [data-theme] block is undefined in the third state -- the default, where the
+ * user has expressed no preference and nothing is stamped on <html> -- and that is the classic
+ * unreadable-page bug: one theme's text on the other theme's ground.
+ */
+:root {
+  color-scheme: light;
+  --agni-orange:#F15A2A; --agni-orange-hover:#D94A1C; --agni-orange-tint:#FFF4E8;
+  --agni-gold:#FADA3E; --agni-gold-pale:#FFED99; --agni-crimson:#95001A;
+  --agni-white:#FFF;
+  --surface-1:#FFFFFF; --surface-2:#F7F7F8; --surface-3:#EFEFF2;
+  --border-subtle:#E8E8EC;
+  --surface-highlight:#FDF3D2; --surface-accent:#FFF4E8;
+  --text-body:#000000; --text-muted:#888894; --text-heading:var(--agni-crimson);
+  --action-primary:var(--agni-orange);
+  --danger:#B3261E; --danger-tint:#FFF1F0;
+  --success:#1B7F3B; --info:#1565C0;
+  /* Chart ink for canvas and SVG, which cannot read a Tailwind utility. Read these from JS via
+   * getComputedStyle so a plot drawn on a dark page does not come back with black axes. */
+  --chart-ink:#344054; --chart-muted:#667085; --chart-grid:#E8E8EC;
+}
+
+/* System preference, for the un-stamped default state. Guarded so an explicit light choice still
+ * wins on a machine whose OS is dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --agni-orange-tint:#2A1710;
+    --surface-1:#17171A; --surface-2:#1E1E23; --surface-3:#27272E;
+    --border-subtle:#34343C;
+    --surface-highlight:#2B2410; --surface-accent:#2A1710;
+    --text-body:#E9E9ED; --text-muted:#9A9AA6; --text-heading:#FF8663;
+    --danger:#FF6B60; --danger-tint:#2A1512;
+    --success:#4ADE80; --info:#7AB8FF;
+    --chart-ink:#C9CBD1; --chart-muted:#9A9AA6; --chart-grid:#34343C;
+  }
+}
+
+/* The explicit choice, which must win in BOTH directions -- including dark-on-a-light-OS, which the
+ * media query above cannot express. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --agni-orange-tint:#2A1710;
+  --surface-1:#17171A; --surface-2:#1E1E23; --surface-3:#27272E;
+  --border-subtle:#34343C;
+  --surface-highlight:#2B2410; --surface-accent:#2A1710;
+  --text-body:#E9E9ED; --text-muted:#9A9AA6; --text-heading:#FF8663;
+  --danger:#FF6B60; --danger-tint:#2A1512;
+  --success:#4ADE80; --info:#7AB8FF;
+  --chart-ink:#C9CBD1; --chart-muted:#9A9AA6; --chart-grid:#34343C;
+}
+
+body { background:var(--surface-1); color:var(--text-body); font-family:var(--font-body); font-size:14px; line-height:1.5 }
 h1,h2,h3 { font-family:var(--font-display); color:var(--text-heading); font-weight:600; letter-spacing:-.01em }
-.label-caps { text-transform:uppercase; letter-spacing:.12em; font-size:12px; color:var(--text-muted) }.num { font-family:var(--font-mono); font-variant-numeric:tabular-nums } :focus-visible { outline:none; box-shadow:0 0 0 3px rgba(241,90,42,.28) } button,a { transition:color .15s ease-out,background-color .15s ease-out,border-color .15s ease-out }
+.label-caps { text-transform:uppercase; letter-spacing:.12em; font-size:12px; color:var(--text-muted) }
+.num { font-family:var(--font-mono); font-variant-numeric:tabular-nums }
+:focus-visible { outline:none; box-shadow:0 0 0 3px color-mix(in srgb, var(--action-primary) 40%, transparent) }
+button,a { transition:color .15s ease-out,background-color .15s ease-out,border-color .15s ease-out }
+
+/* Respect a stated preference for less motion; the theme switch is the only place this app animates
+ * something large enough to matter. */
+@media (prefers-reduced-motion: reduce) {
+  button,a { transition:none }
+}

@@ -29,7 +29,7 @@ describe('dashboard reading measures', () => {
 
   it('keeps the recent table usable when the available column is narrow', () => {
     expect(source).toMatch(/<div className="mt-3 overflow-x-auto">/)
-    expect(source).toMatch(/<table className="min-w-\[[^\"]+\] w-full text-sm">/)
+    expect(source).toMatch(/<table className="min-w-\[[^"]+\] w-full text-sm">/)
     expect(source).toMatch(/<th className="px-2 py-2 font-medium" scope="col">Sample key<\/th>/)
   })
 })

@@ -174,7 +174,7 @@ describe('deploy systemd units are safe before an operator installs them', () =>
   it('uses absolute executable paths in ExecStart directives', () => {
     const offenders = files.flatMap((path) => contents(path)
       .filter((line) => /^\s*ExecStart=/.test(line))
-      .filter((line) => !/^\s*ExecStart=[-+!@:\|]*\//.test(line))
+      .filter((line) => !/^\s*ExecStart=[-+!@:|]*\//.test(line))
       .map((line) => `${show(path)}: ${line.trim()}`))
     expect(offenders, 'a relative ExecStart path fails as 203/EXEC, which reads as a missing file').toEqual([])
   })

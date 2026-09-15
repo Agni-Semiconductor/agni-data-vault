@@ -301,6 +301,31 @@ authenticates rather than relying on the name being unguessable.
   moot in production; it is what keeps local development working.
 - `VAULT_READONLY`: server, when `1`, rejects POST/PATCH/DELETE during phase-2 shakedown deploy.
 - `VITE_API_BASE_URL`: client, not secret; the API origin. This is the only permitted `VITE_` var.
+- `VAULT_SITE_URL`: server, optional. Only used to build the "Open in the vault" link on MCP
+  answers. Unset, those answers carry a path instead of a full URL -- a worse answer, not a broken
+  endpoint.
+
+## Connecting an MCP client
+
+`vault-api` answers the Model Context Protocol at `POST /mcp`, and at `/api/mcp` -- which is the
+one that reaches it through the proxy, since only `/api/*` is proxied. Read-only: the seven tools
+are `vault_schema`, `vault_stats`, `list_samples`, `get_sample`, `list_measurements`,
+`get_measurement` and `list_files`.
+
+Credential: `Authorization: Bearer $VAULT_API_KEY` -- the same key machine clients already use, so
+there is no second secret to rotate. A Cloudflare Access assertion is not accepted here; a browser
+session is the wrong credential for a machine client.
+
+The repo's `.mcp.json` points at `http://127.0.0.1:8099/mcp` by default so a local checkout works
+with nothing set. Against the box, set both:
+
+```
+VAULT_MCP_URL=https://<host>/api/mcp
+VAULT_API_KEY=<the key>
+```
+
+Verify it end to end rather than by reading the port: a client that connects but whose first
+`tools/list` returns nothing is the failure worth catching.
 
 ## RHEL 9 SELinux
 

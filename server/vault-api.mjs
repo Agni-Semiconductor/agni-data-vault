@@ -2,6 +2,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import handler from '../api/handler.js';
 import { health } from '../api/_lib/health.js';
+import { handleMcpRequest } from './mcp/server.mjs';
 
 const host = '127.0.0.1';
 const port = Number(process.env.PORT || 8099);
@@ -77,6 +78,15 @@ async function serve(req, res) {
         }
         if (result.buffer.length) { try { req.body = JSON.parse(result.buffer.toString('utf8')); } catch { req.body = {}; } }
       }
+    }
+
+    // MCP is intercepted here for the same reason /healthz is -- handler() applies requireAuth and
+    // then routes into the REST contract, and JSON-RPC is a different envelope with a different
+    // error shape. It sits AFTER the body parse above, unlike /healthz, because the transport is
+    // handed the already-parsed body: reading the stream a second time would hang.
+    if (url.pathname === '/mcp' || url.pathname === '/api/mcp') {
+      if (!aborted) await handleMcpRequest(req, res);
+      return;
     }
 
     if (!aborted) await handler(req, res);

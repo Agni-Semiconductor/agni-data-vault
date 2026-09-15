@@ -29,7 +29,11 @@ const read = (p: string) => readFileSync(resolve(root, p), 'utf8')
 /** Every `process.env.X` the server actually reads. */
 function envVarsInCode(): Set<string> {
   const found = new Set<string>()
-  for (const file of [...walk(resolve(root, 'api')), resolve(root, 'server/vault-api.mjs')]) {
+  // The whole of server/, not just vault-api.mjs: server/mcp/ reads VAULT_SITE_URL and
+  // VAULT_API_KEY, and naming one file meant a new module under it was invisible to this check --
+  // which is the undocumented-variable failure this test exists to catch, reintroduced by the
+  // shape of the test itself.
+  for (const file of [...walk(resolve(root, 'api')), ...walk(resolve(root, 'server'))]) {
     for (const m of read(file).matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) found.add(m[1])
   }
   return found
@@ -39,7 +43,7 @@ function envVarsInCode(): Set<string> {
 const NOT_OURS = new Set(['PORT', 'NODE_ENV', 'CI'])
 // Documented and deliberately absent from the server: these belong to the CLI, the client, or
 // the test suite.
-const CLIENT_OR_CLI = new Set(['VITE_API_BASE_URL', 'VAULT_API_URL', 'FED_PGRST_JWT_SECRET', 'VAULT_REAL_XLSX'])
+const CLIENT_OR_CLI = new Set(['VITE_API_BASE_URL', 'VAULT_API_URL', 'FED_PGRST_JWT_SECRET', 'VAULT_REAL_XLSX', 'VAULT_MCP_URL'])
 
 /**
  * Only the forms that INSTRUCT an operator to set something.
@@ -68,6 +72,11 @@ describe('environment variables: code and documentation agree', () => {
     const vars = envVarsInCode()
     expect(vars.size).toBeGreaterThan(5)
     expect(vars).toContain('VAULT_SERVICE_JWT')
+  })
+
+  it('looks at server/mcp too, not only server/vault-api.mjs', () => {
+    // A variable read by a module this walk does not visit is undocumented and undetected at once.
+    expect(envVarsInCode()).toContain('VAULT_SITE_URL')
   })
 
   it('every variable the server reads is documented somewhere an operator will look', () => {

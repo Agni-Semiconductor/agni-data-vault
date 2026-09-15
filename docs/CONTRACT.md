@@ -961,3 +961,63 @@ code rather than at the instruction that caused it.
 document mentions, a variable a document names and the server never reads, or `VAULT_IDENTITY`
 reappearing in the Access path. **The second direction is the one that fails silently** — the
 operator sets it, nothing complains, and the feature is simply not configured.
+
+## v2.20 The MCP endpoint (new section)
+
+`POST /mcp` on `vault-api` speaks the Model Context Protocol over Streamable HTTP, so a model can
+query the vault through the same functions the pages use. It is also mounted at `/api/mcp`, which
+is the path that reaches it through the existing proxy rules — Caddy proxies `/api/*`, and adding a
+route for a second prefix to reach the same handler would be a rule to keep correct for nothing.
+
+**Read-only by construction, not by policy.** `server/mcp/tools.mjs` imports only the reader
+exports of `api/_lib/resources/*`. A write is not something the server declines to do; it is
+something it holds no reference to. A check can be removed by someone who does not know why it is
+there, an absent import cannot. The seven tools are `vault_schema`, `vault_stats`, `list_samples`,
+`get_sample`, `list_measurements`, `get_measurement`, `list_files`.
+
+Whether a model may ever write to the vault is a separate decision, and this endpoint must not be
+the place it arrives by default.
+
+**The same queries the pages run.** Each tool calls the resource function `api/handler.js` routes
+to, so an MCP answer and a page answer cannot disagree. A second implementation of "list samples
+with these filters" would be a second thing to keep correct.
+
+**Free text is data.** Every payload carrying stored records is prefixed with a line saying that
+notes, labels and filenames are content to report on and never instructions to follow, and each
+one carries a vault URL a human can open to check the answer. `vault_schema` is exempt from the
+prefix: the vault authored that document itself.
+
+**An unrecognised filter key is refused.** `api/_lib/query.js` applies the keys it knows and
+ignores the rest — correct for an HTTP query string, and harmless for the UI, which only emits keys
+it got from the schema. For a model it is not: a misremembered key does not error, the filter
+silently disappears, and the tool answers a narrow question with the whole table. So the MCP layer
+validates filter keys against the live `field_definitions` first and returns an error naming the
+usable keys. This is the one place the endpoint does more than pass a call through.
+
+Callers pass plain keys as `vault_schema` reports them (`stack_fe_t_nm`, `stack_fe_t_nm.min`); the
+translation to the `meta.` form the query layer expects happens here. `search` is translated to
+`q` for the same reason — passing `search` through would have been accepted and ignored.
+
+**Authentication** is `Authorization: Bearer $VAULT_API_KEY`, compared with `timingSafeEqual`, the
+same secret as the REST API. A Cloudflare Access assertion is deliberately NOT accepted: a browser
+session is the wrong credential for a machine client. An unset `VAULT_API_KEY` is a 500, never an
+open endpoint.
+
+**Stateless.** One `Server` and one transport per request, no session ids. Every tool is a read
+that answers and finishes, so there is nothing to notify a client about and no session state worth
+keeping restart-proof.
+
+### Pinned dependency (amends §3)
+
+`@modelcontextprotocol/sdk` — **server-only**, like `@supabase/supabase-js` and
+`@anthropic-ai/sdk`. It must never appear in a browser bundle; the import lives under `server/mcp/`
+only.
+
+### Env var (amends v2.4)
+
+| var | where | notes |
+|---|---|---|
+| `VAULT_SITE_URL` | server | optional; the site origin used to build the "Open in the vault" URL in every MCP payload. Unset means the payload carries a path rather than a full link. |
+
+`VAULT_MCP_URL` is a **client** variable read by `.mcp.json`, not by the server. It defaults to
+`http://127.0.0.1:8099/mcp` so a local checkout works with no configuration.

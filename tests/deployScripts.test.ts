@@ -150,7 +150,7 @@ describe('deploy scripts carry no character that fails as something else', () =>
     // supposed to hold a path: non-empty, so the guard passed; `dirname` returned "."; and the
     // step created and chowned a file named <0x01> in the current directory and printed `ok`.
     //
-    // Nothing about that is visible. The line looks like `s/.../​/p` with an empty replacement, in
+    // Nothing about that is visible. The line looks like `s/.../<U+200B>/p` with an empty replacement, in
     // an editor, in a diff, and in `grep`. Only the bytes say otherwise.
     const allowed = new Set([9, 10, 13]) // tab, newline, CR (CR has its own assertion above)
     const offenders = files.flatMap((p) => {

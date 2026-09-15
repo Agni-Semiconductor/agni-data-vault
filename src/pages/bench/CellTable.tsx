@@ -94,7 +94,7 @@ export default function CellTable({ dutId, runId, selectedCell, onSelectCell }: 
       </table>
       {!result.isLoading && !result.error && rows.length === 0 && <div className="flex h-40 items-center justify-center px-4 text-center text-sm text-agni-slate">{emptyReason}</div>}
       {result.isLoading && <div className="flex h-40 items-center justify-center"><Spinner /></div>}
-      {result.error && <div className="flex h-40 items-center justify-center px-4 text-center text-sm text-red-600">Cells could not be loaded: {result.error.message}</div>}
+      {result.error && <div className="flex h-40 items-center justify-center px-4 text-center text-sm text-danger">Cells could not be loaded: {result.error.message}</div>}
     </div>
     <div className="flex items-center justify-between gap-3 text-xs text-agni-slate"><span>Page {page + 1} of {pageCount}; {total.toLocaleString()} matching rows</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page === 0 || result.isFetching} onClick={() => setPage((value) => value - 1)}>Previous</Button><Button size="sm" variant="secondary" disabled={page + 1 >= pageCount || result.isFetching} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>
   </section>

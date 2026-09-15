@@ -114,7 +114,7 @@ export default function FigureBuilder() {
   }, [draft.description, draft.spec.layout, draft.title, resolvedPanels])
 
   if (!isNew && query.isLoading) return <div className="flex justify-center py-16"><Spinner /></div>
-  if (!isNew && query.error) return <p className="text-sm text-[#B3261E]">{(query.error as Error).message}</p>
+  if (!isNew && query.error) return <p className="text-sm text-danger">{(query.error as Error).message}</p>
 
   return <div className="space-y-6">
     <div className="flex flex-wrap items-end justify-between gap-3">
@@ -134,10 +134,10 @@ export default function FigureBuilder() {
       </div>
     </div>
     <label className="block"><span className="label-caps mb-1 block">Description</span><Input value={draft.description} onChange={(event) => { setDirty(true); setDraft((c) => ({ ...c, description: event.target.value })) }} className="w-full max-w-2xl" /></label>
-    {save.error && <p className="text-sm text-[#B3261E]">{(save.error as Error).message}</p>}
+    {save.error && <p className="text-sm text-danger">{(save.error as Error).message}</p>}
 
-    {unresolved.length > 0 && <div className="rounded border border-[#B3261E] bg-white p-3 text-sm">
-      <p className="font-medium text-[#B3261E]">{(query.data?.sources ?? []).length - unresolved.length} of {(query.data?.sources ?? []).length} saved trace sources still exist</p>
+    {unresolved.length > 0 && <div className="rounded border border-danger bg-white p-3 text-sm">
+      <p className="font-medium text-danger">{(query.data?.sources ?? []).length - unresolved.length} of {(query.data?.sources ?? []).length} saved trace sources still exist</p>
       <ul className="mt-1 space-y-1 text-agni-slate">{unresolved.map((source) => <li key={`${source.panel_index}-${source.trace_index}`}>panel {source.panel_index + 1}, trace {source.trace_index + 1}{source.label ? ` (${source.label})` : ''}: {source.file_id ? `file ${source.file_id}` : source.capture_id ? `capture ${source.capture_id}` : 'no source'} no longer exists</li>)}</ul>
     </div>}
 
@@ -160,7 +160,7 @@ export default function FigureBuilder() {
               const columnOptions = (source?.parsed?.headers ?? []).map((header) => ({ value: header, label: header }))
               return <div key={traceIndex} className="flex flex-wrap items-end gap-2 rounded border border-border-subtle p-2">
                 <label className="block"><span className="label-caps mb-1 block">File id</span><Input value={trace.src?.file_id ?? ''} onChange={(event) => editTrace(panelIndex, traceIndex, (t) => ({ ...t, src: { file_id: event.target.value } }))} className="w-64 font-mono text-xs" /></label>
-                <span className="pb-2 text-xs text-agni-slate">{source?.loading ? 'loading…' : source?.error ? <span className="text-[#B3261E]">{source.error}</span> : source?.name}</span>
+                <span className="pb-2 text-xs text-agni-slate">{source?.loading ? 'loading…' : source?.error ? <span className="text-danger">{source.error}</span> : source?.name}</span>
                 <Select label="x" value={trace.x ?? ''} placeholder="kind default" options={columnOptions} onChange={(event) => editTrace(panelIndex, traceIndex, (t) => ({ ...t, x: event.target.value || undefined }))} className="w-36" />
                 <Select label="y" value={trace.y ?? ''} placeholder="kind default" options={columnOptions} onChange={(event) => editTrace(panelIndex, traceIndex, (t) => ({ ...t, y: event.target.value || undefined }))} className="w-36" />
                 <label className="block"><span className="label-caps mb-1 block">Label</span><Input value={trace.label ?? ''} onChange={(event) => editTrace(panelIndex, traceIndex, (t) => ({ ...t, label: event.target.value || undefined }))} className="w-40" /></label>

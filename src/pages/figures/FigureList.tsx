@@ -30,12 +30,12 @@ export default function FigureList() {
   const table = useReactTable({ data: result.data?.items ?? [], columns, state: { sorting }, onSortingChange, getCoreRowModel: getCoreRowModel(), manualSorting: true, manualPagination: true })
   const setPage = (nextPage: number) => setParams((current) => { const next = new URLSearchParams(current); if (nextPage) next.set('page', String(nextPage)); else next.delete('page'); return next }, { replace: true })
   if (result.isLoading) return <Spinner />
-  if (result.error) return <p className="text-[#B3261E]">{result.error.message}</p>
+  if (result.error) return <p className="text-danger">{result.error.message}</p>
   const total = result.data?.total ?? 0, emptyText = total ? 'No figures exist on this page.' : debouncedQ ? `No figures match "${debouncedQ}".` : 'No figures have been saved yet.'
   return <div className="space-y-4">
     <header><h1 className="text-xl font-semibold">Figures</h1><p className="mt-1 text-sm text-agni-slate">Saved, shareable figures for publication and review.</p></header>
     <Input aria-label="Search figures" placeholder="Search title, description or slug" value={q} onChange={(event) => setQ(event.target.value)} />
-    {removeError && <p className="text-sm text-[#B3261E]">Could not delete figure: {removeError.message}</p>}
+    {removeError && <p className="text-sm text-danger">Could not delete figure: {removeError.message}</p>}
     <Table table={table} onRowClick={(figure) => navigate(figurePath(figure))} emptyText={emptyText} />
     <div className="flex items-center justify-between"><p className="text-sm text-agni-slate">{total ? `${page * pageSize + 1}-${Math.min((page + 1) * pageSize, total)} of ${total}` : '0 figures'}</p><div className="flex gap-2"><Button variant="secondary" size="sm" disabled={page === 0 || result.isFetching} onClick={() => setPage(page - 1)}>Previous</Button><Button variant="secondary" size="sm" disabled={(page + 1) * pageSize >= total || result.isFetching} onClick={() => setPage(page + 1)}>Next</Button></div></div>
   </div>

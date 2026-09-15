@@ -16,7 +16,7 @@ const formatDate = (value: string | null) => value ? new Intl.DateTimeFormat(und
 function CampaignProgress({ run }: { run: BenchRun }) {
   const count = useQuery({ queryKey: ['bench-cell-count', run.dut_id, run.run_id], queryFn: () => listBenchCells({ dutId: run.dut_id, runId: run.run_id, limit: 1, offset: 0 }), refetchInterval: run.status === 'running' ? 5000 : false })
   if (count.isLoading) return <span className="text-agni-slate">Counting...</span>
-  if (count.error) return <span className="text-[#B3261E]" title={count.error.message}>Count unavailable</span>
+  if (count.error) return <span className="text-danger" title={count.error.message}>Count unavailable</span>
   const measured = count.data?.total ?? 0
   return <span className="font-mono" title="Counted from device tests, including live runs">{measured.toLocaleString()} / {run.n_planned?.toLocaleString() ?? 'unknown'}</span>
 }
@@ -38,7 +38,7 @@ export default function BenchCampaigns() {
   ], [])
   const table = useReactTable({ data: runs.data?.items ?? [], columns, state: { sorting }, onSortingChange: setSorting, getCoreRowModel: getCoreRowModel(), manualSorting: true })
   if (duts.isLoading) return <Spinner />
-  if (duts.error) return <p className="text-[#B3261E]">{duts.error.message}</p>
+  if (duts.error) return <p className="text-danger">{duts.error.message}</p>
   if (!duts.data?.items.length) return <section className="rounded-lg border border-border-subtle bg-white p-6"><h1 className="text-xl font-semibold">Bench campaigns</h1><p className="mt-2 text-sm text-agni-slate">No campaigns can be shown because the bench database contains no DUTs.</p></section>
   const total = runs.data?.total ?? 0
   return <div className="space-y-4">
@@ -47,7 +47,7 @@ export default function BenchCampaigns() {
       <Select label="DUT" value={dutId} options={duts.data.items.map((dut) => ({ value: dut.dut_id, label: dut.dut_id }))} onChange={(event) => updateView(filters, event.target.value)} />
       <Select label="Status" placeholder="All statuses" value={status ?? ''} options={statusOptions} onChange={(event) => updateView(event.target.value ? { ...filters, status: [event.target.value] } : { ...filters, status: [] })} />
     </div>
-    {runs.isLoading ? <Spinner /> : runs.error ? <p className="text-[#B3261E]">{runs.error.message}</p> : <Table table={table} onRowClick={(run) => navigate(`/bench/runs/${encodeURIComponent(run.run_id)}?dut_id=${encodeURIComponent(run.dut_id)}`)} emptyText={`No campaign runs exist for DUT ${dutId}${status ? ` with status ${status}` : ''}.`} />}
+     {runs.isLoading ? <Spinner /> : runs.error ? <p className="text-danger">{runs.error.message}</p> : <Table table={table} onRowClick={(run) => navigate(`/bench/runs/${encodeURIComponent(run.run_id)}?dut_id=${encodeURIComponent(run.dut_id)}`)} emptyText={`No campaign runs exist for DUT ${dutId}${status ? ` with status ${status}` : ''}.`} />}
     <div className="flex items-center justify-between"><p className="text-sm text-agni-slate">{total ? `${page * pageSize + 1}-${Math.min((page + 1) * pageSize, total)} of ${total}` : '0 runs'}</p><div className="flex gap-2"><Button variant="secondary" size="sm" disabled={page === 0} onClick={() => updateView(filters, dutId, page - 1)}>Previous</Button><Button variant="secondary" size="sm" disabled={(page + 1) * pageSize >= total} onClick={() => updateView(filters, dutId, page + 1)}>Next</Button></div></div>
   </div>
 }

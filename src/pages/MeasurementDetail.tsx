@@ -141,7 +141,7 @@ export default function MeasurementDetail() {
     filesQuery.error
   )
     return (
-      <p className="text-red-600">
+      <p className="text-danger">
         {
           (
             measurementQuery.error ??

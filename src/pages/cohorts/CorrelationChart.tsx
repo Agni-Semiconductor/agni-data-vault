@@ -133,7 +133,7 @@ export function CorrelationChart({ result, metric, groupKey }: {
         forgotten. A cohort is whatever matched a predicate, not a random sample. */}
     <p className="text-xs text-agni-slate">No p-value is reported: a cohort is whatever matched the predicate rather than a random sample, so a significance test over it would claim more than the data supports. Judge it from n, R² and the slope&rsquo;s standard error.</p>
 
-    <div className={`rounded border p-3 text-sm ${balanced ? 'border-border-subtle' : 'border-[#B3261E] bg-[#FFF7F6]'}`}>
+    <div className={`rounded border p-3 text-sm ${balanced ? 'border-border-subtle' : 'border-danger bg-danger-tint'}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h4 className="font-medium text-agni-ink">Every member accounted for</h4>
         <span className="num text-xs text-agni-slate">{Number(ledger.n_members).toLocaleString()} matched · {Number(ledger.n_fit).toLocaleString()} fitted</span>
@@ -141,7 +141,7 @@ export function CorrelationChart({ result, metric, groupKey }: {
       {notes.length > 0
         ? <ul className="mt-1 list-inside list-disc text-xs text-agni-slate">{notes.map((note) => <li key={note}>{note}</li>)}</ul>
         : <p className="mt-1 text-xs text-agni-slate">Nothing was excluded.</p>}
-      {!balanced && <p className="mt-2 text-xs font-medium text-[#B3261E]">The ledger does not balance: the API and the database disagree about this population. Treat the fit as untrustworthy.</p>}
+      {!balanced && <p className="mt-2 text-xs font-medium text-danger">The ledger does not balance: the API and the database disagree about this population. Treat the fit as untrustworthy.</p>}
     </div>
   </section>
 }

@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { NavLink, Link, Outlet, useMatches } from 'react-router-dom'
 import clsx from 'clsx'
 import { Button } from './ui'
 import { useAuth } from '../auth/AuthProvider'
 import ThemeToggle from './ThemeToggle'
 import AskSidebar from './AskSidebar'
+import { fitCount } from './fitCount'
 
 /**
  * Primary navigation, and a deliberately short list.
@@ -31,7 +32,7 @@ const overflowLinks = [
   { to: '/admin/vocab', label: 'Vocabularies' },
 ]
 
-function OverflowMenu() {
+function OverflowMenu({ links }: { links: { to: string; label: string }[] }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -67,7 +68,7 @@ function OverflowMenu() {
           role="menu"
           className="absolute right-0 z-30 mt-1 min-w-52 rounded-md border border-border-subtle bg-surface-1 py-1 shadow-overlay"
         >
-          {overflowLinks.map((link) => (
+          {links.map((link) => (
             <NavLink
               key={link.to}
               to={link.to}
@@ -86,9 +87,82 @@ function OverflowMenu() {
   )
 }
 
+/** One source for the link styling, so the measuring row cannot drift from the real one. */
+const LINK_BASE = 'whitespace-nowrap border-b-2 px-3 py-1.5 text-sm'
+const LINK_ACTIVE = 'border-agni-orange font-medium text-agni-orange'
+const LINK_IDLE = 'border-transparent text-agni-ink hover:text-agni-orange'
+
+/**
+ * How many primary links fit, MEASURED rather than guessed.
+ *
+ * The bug this replaces: the nav is `min-w-0 flex-1`, so its box shrinks, but its children are
+ * `whitespace-nowrap` and will not shrink below their text. They overflowed the box and painted
+ * straight over the Ask button, the theme control and Sign out -- `scrollWidth` 601 against a
+ * `clientWidth` of 165. Overlapping controls, all of them still clickable somewhere underneath.
+ *
+ * A media query cannot fix it. The space the nav gets is set by the assistant panel, not by the
+ * window: opening the panel at 1024px leaves the bar 512px to work with while every `lg:` rule
+ * still applies. Nor can a table of breakpoints -- the right-hand group carries the signed-in
+ * email, so its width depends on whose it is.
+ *
+ * So: measure, ask the list how much room it actually has, and show the ones that fit. The rest
+ * join the menu that already existed for the admin destinations, so nothing becomes unreachable --
+ * it moves.
+ *
+ * MEASURED OFF A SEPARATE HIDDEN ROW, not off the visible links. Measuring the visible ones was my
+ * first version and it is a trap: once a link has moved into the menu it is no longer in the list
+ * to measure, so the cache can never be corrected. A first measurement taken before the webfont
+ * swapped in was therefore permanent, and the bar sat one link short of what fits -- which is what
+ * it did, showing five where six had room. The hidden row always holds every label, so a
+ * re-measure is always possible.
+ *
+ * It measures the ACTIVE styling, which carries font-medium and is the wider of the two. Rounding
+ * against the wider state means the estimate can only ever be generous, and a link that is one
+ * pixel too eager is the failure mode that brought the overlap back.
+ *
+ * This cannot oscillate: the list is `flex-1` with a zero basis, so its width comes from the header
+ * and its siblings, never from its own contents.
+ */
+function usePriorityNav(count: number) {
+  const listRef = useRef<HTMLDivElement>(null)
+  const measureRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(count)
+
+  useLayoutEffect(() => {
+    const list = listRef.current
+    const row = measureRef.current
+    if (!list || !row) return
+
+    const fit = () => {
+      const widths = [...row.children].map((el) => el.getBoundingClientRect().width)
+      if (widths.length !== count) return
+      // In jsdom every width is 0, so everything fits and the bar renders whole -- which is the
+      // right answer for a test that is reading structure rather than pixels.
+      const gap = Number.parseFloat(getComputedStyle(list).columnGap) || 0
+      setVisible(fitCount(widths, list.clientWidth, gap))
+    }
+
+    fit()
+    const observer = new ResizeObserver(fit)
+    observer.observe(list)
+    observer.observe(row)
+    // A webfont swapping in changes the width of every label, so the first measurement -- taken
+    // against whatever face was available -- is provisional.
+    document.fonts?.ready.then(fit).catch(() => undefined)
+    return () => observer.disconnect()
+  }, [count])
+
+  return { listRef, measureRef, visible }
+}
+
 export default function Layout() {
   const { user, signOut } = useAuth()
   const [askOpen, setAskOpen] = useState(false)
+  const { listRef, measureRef, visible } = usePriorityNav(primaryLinks.length)
+  // The links that did not fit are not dropped, they move: the menu is the same one the admin
+  // destinations already live in, so there is one place to look for anything not on the bar.
+  const barLinks = primaryLinks.slice(0, visible)
+  const menuLinks = [...primaryLinks.slice(visible), ...overflowLinks]
   const matches = useMatches()
   const wideMain = matches.some((match) => (match.handle as { wideMain?: boolean } | undefined)?.wideMain)
 
@@ -134,25 +208,40 @@ export default function Layout() {
           </Link>
           {/* min-w-0 lets the nav shrink instead of forcing the row to wrap, which is what pushed
               "Vocabularies" onto a second line. */}
-          <nav className="flex min-w-0 flex-1 items-center gap-1">
-            {primaryLinks.map((link) => (
+          <nav className="relative flex min-w-0 flex-1 items-center gap-1">
+            {/* The ruler. Never shown, never focusable, never read out -- it exists only so every
+                label can still be measured after it has moved into the menu. It is absolutely
+                positioned so it takes no space, and the shell's overflow-x-clip keeps it from
+                widening the page. */}
+            <div
+              ref={measureRef}
+              aria-hidden="true"
+              inert
+              className="pointer-events-none invisible absolute left-0 top-0 flex items-center gap-1"
+            >
+              {primaryLinks.map((link) => (
+                <span key={link.to} className={clsx(LINK_BASE, LINK_ACTIVE)}>
+                  {link.label}
+                </span>
+              ))}
+            </div>
+            {/* The measured list. overflow-hidden is the backstop for the frame before the first
+                measurement lands -- a link may be clipped there, but nothing is ever painted over
+                the controls to the right. The menu is its SIBLING, not inside it, because the
+                dropdown is absolutely positioned and this box would clip it away. */}
+            <div ref={listRef} className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+            {barLinks.map((link) => (
               <NavLink
                 key={link.to}
                 to={link.to}
                 end={link.end}
-                className={({ isActive }) =>
-                  clsx(
-                    'whitespace-nowrap border-b-2 px-3 py-1.5 text-sm',
-                    isActive
-                      ? 'border-agni-orange font-medium text-agni-orange'
-                      : 'border-transparent text-agni-ink hover:text-agni-orange',
-                  )
-                }
+                className={({ isActive }) => clsx(LINK_BASE, isActive ? LINK_ACTIVE : LINK_IDLE)}
               >
                 {link.label}
               </NavLink>
             ))}
-            <OverflowMenu />
+            </div>
+            <OverflowMenu links={menuLinks} />
           </nav>
           <div className="flex shrink-0 items-center gap-3">
             <button

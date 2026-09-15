@@ -88,6 +88,7 @@ function OverflowMenu() {
 
 export default function Layout() {
   const { user, signOut } = useAuth()
+  const [askOpen, setAskOpen] = useState(false)
   const matches = useMatches()
   const wideMain = matches.some((match) => (match.handle as { wideMain?: boolean } | undefined)?.wideMain)
 
@@ -106,7 +107,13 @@ export default function Layout() {
   const container = clsx('mx-auto w-full px-8', wideMain ? 'max-w-none' : 'max-w-[1920px]')
 
   return (
-    <div className="flex min-h-screen flex-col bg-surface-1">
+    /* A ROW, not a stack with something floating over it. The content column and the assistant
+     * share the width, so opening the panel COMPRESSES the page rather than covering it and
+     * everything on the left stays interactive -- scroll the table, change a filter, click a row,
+     * with the panel still open. min-w-0 is what actually lets the column give up space; without
+     * it a wide table refuses to shrink and pushes the panel off-screen instead. */
+    <div className="flex min-h-screen bg-surface-1">
+      <div className="flex min-w-0 flex-1 flex-col">
       <header className="border-b border-border-subtle bg-surface-1">
         <div className={clsx(container, 'flex items-center gap-x-6 py-4')}>
           <Link to="/" className="flex shrink-0 items-center gap-3">
@@ -143,7 +150,20 @@ export default function Layout() {
             <OverflowMenu />
           </nav>
           <div className="flex shrink-0 items-center gap-3">
-            <AskSidebar />
+            <button
+              type="button"
+              onClick={() => setAskOpen((value) => !value)}
+              aria-expanded={askOpen}
+              aria-controls="ask-panel"
+              className={clsx(
+                'rounded-md border px-2 py-1 text-sm',
+                askOpen
+                  ? 'border-agni-orange text-agni-orange'
+                  : 'border-border-subtle text-agni-ink hover:border-agni-orange hover:text-agni-orange',
+              )}
+            >
+              Ask
+            </button>
             <ThemeToggle />
             <span className="hidden max-w-48 truncate font-mono text-xs text-agni-slate lg:inline">{user?.email}</span>
             <Button variant="ghost" size="sm" onClick={() => void signOut()}>
@@ -159,6 +179,8 @@ export default function Layout() {
         <span className="label-caps">AGNI CONFIDENTIAL</span>
         <span className="text-xs text-agni-slate">Agni Data Vault © Agni Semiconductor</span>
       </footer>
+      </div>
+      <AskSidebar id="ask-panel" open={askOpen} onClose={() => setAskOpen(false)} />
     </div>
   )
 }

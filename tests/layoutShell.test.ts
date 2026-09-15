@@ -68,7 +68,21 @@ describe('app shell', () => {
   it('offers the assistant and the theme control from every page', () => {
     // Ask was a tab you navigated to, which meant leaving whatever you were reading. Both of these
     // live in the shell so they are reachable without losing your place.
-    expect(directives).toMatch(/<AskSidebar\s*\/>/)
+    expect(directives).toMatch(/<AskSidebar\b/)
     expect(directives).toMatch(/<ThemeToggle\s*\/>/)
+  })
+
+  it('lays the assistant BESIDE the page rather than over it', () => {
+    // The panel compresses the content column instead of covering it, so the page stays usable
+    // while it is open. Verified in the browser: main goes 1920 -> 1457 on open, and typing into a
+    // filter on the left still narrowed the table from 4 rows to 1 with the panel open.
+    //
+    // The shell must therefore be a ROW whose content column can actually give up width. min-w-0
+    // is the load-bearing part: without it a wide table refuses to shrink and pushes the panel off
+    // the screen instead of sharing with it.
+    expect(directives, 'the shell must be a row').toMatch(/<div className="flex min-h-screen/)
+    expect(directives, 'the content column must be able to shrink').toMatch(/flex min-w-0 flex-1 flex-col/)
+    // And no scrim: a dimmed overlay says "nothing else is available", which is now false.
+    expect(directives, 'a scrim would contradict the whole point').not.toMatch(/bg-black\//)
   })
 })

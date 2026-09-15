@@ -1,89 +1,80 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import AskConversation from '../pages/search/AskConversation'
 
 /**
- * The assistant as a panel, not a destination.
+ * The assistant as a companion column, not an overlay.
  *
- * As its own tab it took you away from whatever you were looking at, and the answer arrived
- * somewhere you then had to leave. As a slide-over it is available from every page, and what it
- * produces is a URL.
+ * It began as a slide-OVER: a fixed panel above a dimmed scrim. That was wrong for how it is
+ * actually used. The answer it produces is a filter you want to try against the list you were
+ * already looking at, and an overlay makes that a sequence -- read, open, ask, dismiss, look --
+ * when it should be a conversation with the page still in front of you. A scrim also says
+ * "nothing else is available until you deal with me", which is false here.
  *
- * THE COMMITMENT: the answer is a URL. The agent already returns one, so nothing is re-derived
- * here -- the filter it proposes and one you build by hand are the same object, landing on the same
- * page, editable and shareable. An assistant whose output can only be consumed by itself has no
- * place in a system built on provenance.
+ * So the page COMPRESSES instead. The content column narrows, the panel takes the space beside it,
+ * and everything on the left stays live: you can scroll the table, change a filter, click a row,
+ * all while the panel is open.
+ *
+ * That also removes the modal machinery. No scrim, no aria-modal, no focus trap -- because focus is
+ * no longer trapped, and pretending otherwise to a screen reader would be a lie about what the
+ * page does.
  */
-export default function AskSidebar() {
-  const [open, setOpen] = useState(false)
+export default function AskSidebar({ id, open, onClose }: { id?: string; open: boolean; onClose: () => void }) {
   const navigate = useNavigate()
   const panelRef = useRef<HTMLDivElement>(null)
-  const openerRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!open) return
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    // Escape still closes it -- that is a convenience here rather than the only way out, since the
+    // rest of the page remains clickable.
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [open])
+  }, [open, onClose])
 
   useEffect(() => {
-    // Move focus into the panel when it opens and back to the opener when it closes, or keyboard
-    // users tab from the header into a panel they cannot see the start of.
+    // Move focus in on open so a keyboard user lands in the panel they just asked for. Focus is NOT
+    // restored on close and NOT trapped while open: the page behind is a legitimate destination.
     if (open) panelRef.current?.focus()
-    else openerRef.current?.focus({ preventScroll: true })
   }, [open])
 
   const openFilter = useCallback(
     (url: string) => {
-      setOpen(false)
+      // The panel stays OPEN. The whole point of compressing rather than covering is that you can
+      // see the result arrive in the list beside you and keep refining.
       navigate(url)
     },
     [navigate],
   )
 
+  if (!open) return null
+
   return (
-    <>
-      <button
-        ref={openerRef}
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        className="rounded-md border border-border-subtle px-2 py-1 text-sm text-agni-ink hover:border-agni-orange hover:text-agni-orange"
-      >
-        Ask
-      </button>
-      {open ? (
-        <>
-          {/* The scrim is a sibling, not a parent: a click target that also contains the panel
-              swallows clicks meant for the panel unless every one of them stops propagation. */}
-          <div className="ask-scrim fixed inset-0 z-40 bg-black/40" onClick={() => setOpen(false)} aria-hidden="true" />
-          <div
-            ref={panelRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Ask the vault"
-            tabIndex={-1}
-            className="ask-panel fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-border-subtle bg-surface-1 shadow-overlay focus:outline-none"
-          >
-            <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
-              <h2 className="text-base">Ask the vault</h2>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-                className="rounded-md px-2 py-1 text-agni-slate hover:text-agni-orange"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-              <AskConversation onOpenFilter={openFilter} />
-            </div>
-          </div>
-        </>
-      ) : null}
-    </>
+    <aside
+      id={id}
+      ref={panelRef}
+      tabIndex={-1}
+      aria-label="Ask the vault"
+      // sticky + h-screen so the panel stays put while the page beside it scrolls; shrink-0 so the
+      // content column gives up the width rather than the panel being squeezed to nothing.
+      className="ask-panel sticky top-0 flex h-screen w-full max-w-sm shrink-0 flex-col border-l border-border-subtle bg-surface-1 focus:outline-none lg:max-w-md"
+    >
+      <div className="flex items-center justify-between border-b border-border-subtle px-4 py-4">
+        <h2 className="text-base">Ask the vault</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close the assistant"
+          className="rounded-md px-2 py-1 text-agni-slate hover:text-agni-orange"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <AskConversation onOpenFilter={openFilter} />
+      </div>
+    </aside>
   )
 }

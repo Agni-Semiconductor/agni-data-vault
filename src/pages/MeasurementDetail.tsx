@@ -19,6 +19,7 @@ import { PreviewTable } from "../plot/PreviewTable";
 import { useParsedFile } from "../plot/useParsedFile";
 import { MetaGrid } from "./parts/MetaGrid";
 import { FileDropzone } from "./parts/FileDropzone";
+import ConfirmByTyping from "../components/ConfirmByTyping";
 
 type UploadRow = {
   name: string;
@@ -71,7 +72,6 @@ export default function MeasurementDetail() {
   const [activeTab, setActiveTab] = useState<"read" | "edit">("read");
   const [edit, setEdit] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [error, setError] = useState("");
   const [uploads, setUploads] = useState<UploadRow[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
@@ -208,7 +208,6 @@ export default function MeasurementDetail() {
   };
   const closeDeleteDialog = () => {
     setDeleteDialogOpen(false);
-    setDeleteConfirmation("");
   };
   return (
     <div className="space-y-6">
@@ -544,47 +543,25 @@ export default function MeasurementDetail() {
           />
         </>
       </Modal>
-      <Modal
+      <ConfirmByTyping
         open={deleteDialogOpen}
         onClose={closeDeleteDialog}
         title="Delete measurement"
-      >
-        <div className="space-y-4">
-          <p>
+        phrase={measurement.id}
+        inputId="delete-measurement-confirmation"
+        inputLabel="Type the measurement identifier to confirm deletion"
+        confirmLabel="Delete measurement"
+        description={
+          <>
             This will permanently destroy measurement{" "}
-            <code className="font-mono">{measurement.id}</code> and its{" "}
-            {files.length} file(s).
-          </p>
-          <label
-            className="block text-sm font-medium text-agni-ink"
-            htmlFor="delete-measurement-confirmation"
-          >
-            Type <code className="font-mono">{measurement.id}</code> to confirm
-          </label>
-          <input
-            id="delete-measurement-confirmation"
-            aria-label="Type the measurement identifier to confirm deletion"
-            className="w-full rounded-md border border-border-subtle bg-white px-3 py-2 text-sm outline-none focus:border-agni-orange"
-            value={deleteConfirmation}
-            onChange={(event) => setDeleteConfirmation(event.target.value)}
-          />
-          <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={closeDeleteDialog}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              disabled={deleteConfirmation !== measurement.id}
-              onClick={async () => {
-                await deleteMeasurement(measurement.id);
-                navigate(`/samples/${sample.sample_id}`);
-              }}
-            >
-              Delete measurement
-            </Button>
-          </div>
-        </div>
-      </Modal>
+            <code className="font-mono">{measurement.id}</code> and its {files.length} file(s).
+          </>
+        }
+        onConfirm={async () => {
+          await deleteMeasurement(measurement.id);
+          navigate(`/samples/${sample.sample_id}`);
+        }}
+      />
     </div>
   );
 }

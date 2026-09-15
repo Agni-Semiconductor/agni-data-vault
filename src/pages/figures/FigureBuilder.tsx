@@ -144,17 +144,16 @@ export default function FigureBuilder() {
     <div className="space-y-8">
       {draft.spec.panels.map((panel, panelIndex) => {
         const { loading, panel: withFailures } = resolvedPanels[panelIndex]
-        return <section key={panelIndex} className="space-y-3">
-          <div className="flex flex-wrap items-end gap-3">
-            <span className="label-caps">Panel {panelIndex + 1}</span>
-            <label className="block"><span className="label-caps mb-1 block">Unit</span><Input value={panel.unit ?? ''} onChange={(event) => editPanel(panelIndex, (p) => ({ ...p, unit: event.target.value || null }))} placeholder="adopt first trace" className="w-32" /></label>
-            <Select label="Y scale" value={panel.y_scale ?? 'linear'} options={[{ value: 'linear', label: 'linear' }, { value: 'log', label: 'log' }]} onChange={(event) => editPanel(panelIndex, (p) => ({ ...p, y_scale: event.target.value as 'log' | 'linear' }))} className="w-28" />
-            <Button variant="ghost" size="sm" onClick={() => edit((spec) => ({ ...spec, panels: spec.panels.filter((_, at) => at !== panelIndex) }))} disabled={draft.spec.panels.length === 1}>Remove panel</Button>
-          </div>
+        return <section key={panelIndex} className="grid gap-6 lg:grid-cols-[minmax(0,28rem)_minmax(0,1fr)]">
+          <div data-testid="figure-builder-controls" className="min-w-0 max-w-md space-y-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <span className="label-caps">Panel {panelIndex + 1}</span>
+              <label className="block"><span className="label-caps mb-1 block">Unit</span><Input value={panel.unit ?? ''} onChange={(event) => editPanel(panelIndex, (p) => ({ ...p, unit: event.target.value || null }))} placeholder="adopt first trace" className="w-32" /></label>
+              <Select label="Y scale" value={panel.y_scale ?? 'linear'} options={[{ value: 'linear', label: 'linear' }, { value: 'log', label: 'log' }]} onChange={(event) => editPanel(panelIndex, (p) => ({ ...p, y_scale: event.target.value as 'log' | 'linear' }))} className="w-28" />
+              <Button variant="ghost" size="sm" onClick={() => edit((spec) => ({ ...spec, panels: spec.panels.filter((_, at) => at !== panelIndex) }))} disabled={draft.spec.panels.length === 1}>Remove panel</Button>
+            </div>
 
-          {loading ? <div className="flex justify-center py-8"><Spinner /></div> : <FigurePanel panel={withFailures} unit={panel.unit ?? undefined} />}
-
-          <div className="space-y-2">
+            <div className="space-y-2">
             {(panel.traces ?? []).map((trace, traceIndex) => {
               const source = trace.src?.file_id ? sources[trace.src.file_id] : undefined
               const columnOptions = (source?.parsed?.headers ?? []).map((header) => ({ value: header, label: header }))
@@ -169,6 +168,10 @@ export default function FigureBuilder() {
               </div>
             })}
             <Button variant="ghost" size="sm" onClick={() => editPanel(panelIndex, (p) => ({ ...p, traces: [...(p.traces ?? []), { src: {} }] }))}>Add trace</Button>
+            </div>
+          </div>
+          <div data-testid="figure-builder-preview" className="min-w-0">
+            {loading ? <div className="flex justify-center py-8"><Spinner /></div> : <FigurePanel panel={withFailures} unit={panel.unit ?? undefined} />}
           </div>
         </section>
       })}

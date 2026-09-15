@@ -39,11 +39,11 @@ export default function BenchCampaigns() {
   const table = useReactTable({ data: runs.data?.items ?? [], columns, state: { sorting }, onSortingChange: setSorting, getCoreRowModel: getCoreRowModel(), manualSorting: true })
   if (duts.isLoading) return <Spinner />
   if (duts.error) return <p className="text-danger">{duts.error.message}</p>
-  if (!duts.data?.items.length) return <section className="rounded-lg border border-border-subtle bg-white p-6"><h1 className="text-xl font-semibold">Bench campaigns</h1><p className="mt-2 text-sm text-agni-slate">No campaigns can be shown because the bench database contains no DUTs.</p></section>
+  if (!duts.data?.items.length) return <section className="rounded-lg border border-border-subtle bg-white p-6"><div className="max-w-xl"><h1 className="text-xl font-semibold">Bench campaigns</h1><p className="mt-2 text-sm text-agni-slate">No campaigns can be shown because the bench database contains no DUTs.</p></div></section>
   const total = runs.data?.total ?? 0
   return <div className="space-y-4">
-    <header><h1 className="text-xl font-semibold">Bench campaigns</h1><p className="mt-1 text-sm text-agni-slate">Read-only campaign history from the ferrodiode bench.</p></header>
-    <div className="grid gap-3 rounded-lg border border-border-subtle bg-white p-4 sm:grid-cols-2">
+     <header className="max-w-2xl"><h1 className="text-xl font-semibold">Bench campaigns</h1><p className="mt-1 text-sm text-agni-slate">Read-only campaign history from the ferrodiode bench.</p></header>
+     <div className="grid max-w-2xl gap-3 rounded-lg border border-border-subtle bg-white p-4 sm:grid-cols-2">
       <Select label="DUT" value={dutId} options={duts.data.items.map((dut) => ({ value: dut.dut_id, label: dut.dut_id }))} onChange={(event) => updateView(filters, event.target.value)} />
       <Select label="Status" placeholder="All statuses" value={status ?? ''} options={statusOptions} onChange={(event) => updateView(event.target.value ? { ...filters, status: [event.target.value] } : { ...filters, status: [] })} />
     </div>

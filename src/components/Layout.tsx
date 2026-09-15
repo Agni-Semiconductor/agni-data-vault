@@ -111,8 +111,13 @@ export default function Layout() {
      * share the width, so opening the panel COMPRESSES the page rather than covering it and
      * everything on the left stays interactive -- scroll the table, change a filter, click a row,
      * with the panel still open. min-w-0 is what actually lets the column give up space; without
-     * it a wide table refuses to shrink and pushes the panel off-screen instead. */
-    <div className="flex min-h-screen bg-surface-1">
+     * it a wide table refuses to shrink and pushes the panel off-screen instead.
+     *
+     * overflow-x-clip because the CLOSED panel is parked past the right edge on a negative
+     * margin. Clip, not hidden: hidden would make this a scroll container and break the
+     * panel's sticky positioning, which is the whole reason it stays put while the page
+     * scrolls beside it. */
+    <div className="flex min-h-screen overflow-x-clip bg-surface-1">
       <div className="flex min-w-0 flex-1 flex-col">
       <header className="border-b border-border-subtle bg-surface-1">
         <div className={clsx(container, 'flex items-center gap-x-6 py-4')}>

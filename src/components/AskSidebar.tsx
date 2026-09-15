@@ -18,6 +18,12 @@ import AskConversation from '../pages/search/AskConversation'
  * That also removes the modal machinery. No scrim, no aria-modal, no focus trap -- because focus is
  * no longer trapped, and pretending otherwise to a screen reader would be a lie about what the
  * page does.
+ *
+ * ALWAYS MOUNTED, never unmounted on close. Returning null when closed is why the old version
+ * jolted: there was nothing in the row to animate FROM, so the panel arrived at full width and the
+ * page snapped around it. Staying mounted is what lets the margin transition in index.css carry it
+ * in and out, and it keeps a half-typed question alive across a close -- which, for a panel you
+ * close to go look at something, is the behaviour you want anyway.
  */
 export default function AskSidebar({ id, open, onClose }: { id?: string; open: boolean; onClose: () => void }) {
   const navigate = useNavigate()
@@ -49,17 +55,22 @@ export default function AskSidebar({ id, open, onClose }: { id?: string; open: b
     [navigate],
   )
 
-  if (!open) return null
-
   return (
     <aside
       id={id}
       ref={panelRef}
       tabIndex={-1}
       aria-label="Ask the vault"
+      // The closed panel is still in the document, parked off the right edge. `inert` is what keeps
+      // that from being a trap: it takes the whole subtree out of the tab order, out of the
+      // accessibility tree and out of hit testing at once. Without it a keyboard user tabs into a
+      // form they cannot see -- worse than the jolt this change was made to fix.
+      inert={!open}
+      data-open={open ? 'true' : 'false'}
       // sticky + h-screen so the panel stays put while the page beside it scrolls; shrink-0 so the
-      // content column gives up the width rather than the panel being squeezed to nothing.
-      className="ask-panel sticky top-0 flex h-screen w-full max-w-sm shrink-0 flex-col border-l border-border-subtle bg-surface-1 focus:outline-none lg:max-w-md"
+      // content column gives up the width rather than the panel being squeezed to nothing. Width
+      // and the closed margin come from .ask-panel, where one custom property holds both.
+      className="ask-panel sticky top-0 flex h-screen shrink-0 flex-col border-l border-border-subtle bg-surface-1 focus:outline-none"
     >
       <div className="flex items-center justify-between border-b border-border-subtle px-4 py-4">
         <h2 className="text-base">Ask the vault</h2>

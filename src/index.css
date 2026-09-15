@@ -106,21 +106,43 @@ button,a { transition:color .15s ease-out,background-color .15s ease-out,border-
   button,a { transition:none }
 }
 
-/* ── The assistant panel's entrance ───────────────────────────────────────────────────────────
- * A slide-over that simply appears gives no sense of where it came from, and on a wide screen the
- * eye has to hunt for what changed. 220ms on a decelerating curve is long enough to read as motion
- * and short enough not to be something you wait through on the twentieth use.
+/* ── The assistant panel's entrance ───────────────────────────────────────────────
+ * THE SPACE IS WHAT ANIMATES, not the panel on top of it.
  *
- * Transform and opacity only: both are composited, so this does not force layout on a page that may
- * be rendering a 16,384-cell canvas behind the scrim.
+ * The first version translated the panel in from translateX(100%) while it was mounted into the
+ * row at its full width. Transform is composited and costs nothing, which is exactly why it was
+ * the wrong choice here: the row reflowed to its final columns on frame one, so the page snapped
+ * narrower and only then did the panel travel across the gap it had already made. Two motions,
+ * out of step, reading as a jolt followed by a slide.
+ *
+ * So the panel is always in the row and its own margin carries it: closed, a negative
+ * margin-inline-end of exactly its width, which cancels its footprint and parks it past the right
+ * edge; open, zero. One property, so the content column gives up its width at precisely the rate
+ * the panel claims it, and the panel appears to slide in from the right because it does.
+ *
+ * This animates a layout property on purpose. The compression IS the effect -- there is no
+ * composited way to make a column narrow -- and it is one value on one element for 260ms.
+ *
+ * The width lives in a custom property so the margin cannot drift from it. Two places holding the
+ * same number is how a panel ends up not quite parked.
  */
-/* The panel now SHARES the row rather than covering it, so it slides in from its own edge
- * while the content column reflows beside it. */
-@keyframes ask-panel-in { from { transform: translateX(100%) } to { transform: translateX(0) } }
-.ask-panel { animation: ask-panel-in .22s cubic-bezier(.22, 1, .36, 1) both; will-change: transform }
+.ask-panel {
+  --ask-width: min(24rem, 100vw);
+  width: var(--ask-width);
+  transition: margin-inline-end .26s cubic-bezier(.22, 1, .36, 1);
+}
+
+/* Parked: no footprint, and past the edge. The row clips it (overflow-x-clip in Layout), so this
+ * costs no horizontal scrollbar. */
+.ask-panel[data-open='false'] { margin-inline-end: calc(var(--ask-width) * -1) }
+.ask-panel[data-open='true'] { margin-inline-end: 0 }
+
+@media (min-width: 1024px) {
+  .ask-panel { --ask-width: 28rem }
+}
 
 /* A stated preference for less motion is a medical one for some people, not a style setting. The
- * panel still appears; it just stops travelling. */
+ * panel still opens and closes; it just stops travelling. */
 @media (prefers-reduced-motion: reduce) {
-  .ask-panel { animation: none }
+  .ask-panel { transition: none }
 }

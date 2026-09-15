@@ -1,0 +1,27 @@
+# Apply restic's retention policy and reclaim space. Split out of restic-backup.service.
+#
+# WHY IT IS ITS OWN UNIT. It used to be an ExecStartPost on the backup, so when it failed it marked
+# the BACKUP failed -- which it did on all 45 of the last 45 nights, on a stale lock from
+# 2026-08-06, while every one of those backups actually succeeded. Two jobs with two different
+# failure modes and two different urgencies do not belong behind one exit status.
+#
+# Undo: systemctl disable --now restic-prune.timer and put the ExecStartPost back on the backup.
+
+[Unit]
+Description=Restic retention and prune on the Synology NAS
+Requires=mnt-nasbackup.mount
+After=mnt-nasbackup.mount
+# Never run while a backup is in flight: both take the repository lock, and contention is what
+# created the stale lock this split exists to stop happening again.
+Conflicts=restic-backup.service
+After=restic-backup.service
+OnFailure=fedbench-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=RESTIC_CACHE_DIR=/var/cache/restic
+EnvironmentFile=/etc/restic/backup.env
+# The policy is unchanged from what the backup unit carried.
+ExecStart=/usr/bin/restic forget --keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+Nice=10
+IOSchedulingClass=idle

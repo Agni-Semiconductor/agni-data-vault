@@ -42,7 +42,7 @@ Storage, and the four volumes differ in the way that matters:
 | Mount | Size | Redundancy | What it means here |
 |---|---|---|---|
 | `/` | 888 G, 861 G free | RAID1, two NVMe mirrored | Postgres defaults to `/var/lib/pgsql`, which is here; the right home, and no decision needed |
-| `/storage` | 3.8 T | RAID1, two NVMe mirrored | spare capacity, untouched by this stack |
+| `/storage` | 3.8 T | RAID1, two NVMe mirrored | everyone's EDA work, one XFS straight on `md125` with no LVM (verified 2026-09-16), so it cannot be partitioned without a rebuild. The vault's home is `/storage/vault`: a 512 GiB `fallocate`d image loop-mounted as its own XFS by `deploy/vault-volume-install.sh`, which the sims cannot write into and the vault cannot outgrow |
 | `/srv/nextcloud` | 7.3 T | **single disk, no redundancy** | the archive lives here, so the archive is one disk failure from being nothing |
 | `/mnt/nasbackup` | 11 T, 6 T free | NFS to `10.10.10.50` | the second physical copy the cutover gate wants, now that it exists |
 

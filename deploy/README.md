@@ -127,6 +127,56 @@ root filesystem. It is deliberately not `/srv/nextcloud/fedbench/objects`, which
 cold archive on a single non-redundant 7.3T disk. Serving that archive live would make the backup
 and primary the same directory, so a writer bug could damage the only copy.
 
+### The reserved vault volume on `/storage`
+
+Both the object store and the cold archive belong on `/storage`, the mirrored 3.7 T array that the
+nightly restic job already copies to the NAS — and inside a slice the sims cannot fill. `lsblk` on
+the box (2026-09-16) shows why that slice is not a partition: `md125` carries one XFS directly, no
+partition table and no LVM. XFS cannot shrink, so carving a real partition or logical volume means
+copying 824 GB of EDA work off, wiping the array and rebuilding it. Not for 60 GB of vault data.
+
+`deploy/vault-volume-install.sh` reserves the space as a file instead. `fallocate` gives
+`/storage/vault.img` its 512 GiB of blocks immediately — `df` on `/storage` shows them used and no
+sim can write into them — then the file is formatted as XFS and loop-mounted at `/storage/vault` by
+`storage-vault.mount`. The vault gets its own filesystem, its own free space, and a hard ceiling;
+nothing on `/storage` is remounted; the whole thing reverses by unmounting and deleting one file.
+
+```bash
+sudo bash /srv/agni-data-vault/deploy/vault-volume-install.sh --check
+sudo bash /srv/agni-data-vault/deploy/vault-volume-install.sh
+sudo bash /srv/agni-data-vault/deploy/relocate-fedbench-data.sh --check --dest /storage/vault
+sudo bash /srv/agni-data-vault/deploy/relocate-fedbench-data.sh --dest /storage/vault
+```
+
+The one thing that would silently undo the reservation is a **discard**: any trim reaching the loop
+device punches a hole in the image and hands the unused part of the 512 GiB back to the array, with
+nothing reporting it. It is not hypothetical: the first harness run formatted the image with a
+plain `mkfs.xfs`, whose default pre-format discard shrank a 16 GiB test reservation to 65 MiB
+before a single file existed. The installer now formats with `mkfs.xfs -K` and re-runs `fallocate`
+afterwards (which refills holes without touching data), and its final step proves the reservation
+held rather than assuming it.
+
+Three defences against later discards, in order of weight. `99-vault-loop-nodiscard.rules` zeroes
+`discard_max_bytes` on whichever `/dev/loopN` backs the image, so any discard is refused at the
+block layer; this is the load-bearing one, and the harness proved it with a real `fstrim` that was
+refused while the allocation stayed put. The inner XFS is mounted without online discard, which is
+its default and is asserted by the absence of `discard` in the options (XFS never prints
+`nodiscard`, so a check for that word fails on a correct mount). And the mount carries
+`X-fstrim.notrim` so RHEL's weekly `fstrim.timer` skips it — kept as a second layer, but on
+util-linux 2.37 the harness could not show it registering, so the installer's check proves only the
+outcome, that the timer's own `fstrim --listed-in` invocation skips the volume, without crediting
+that option.
+
+`restic-backup.service` excludes `/storage/vault.img`. Restic descends into mount points, so the
+files on the volume are already in the nightly backup by way of `/storage`; the image would add a
+512 GiB read every night to store the same bytes again as one blob. The installer puts that exclude
+in place **before** creating the image, because the next nightly run must already skip it.
+
+The PostgreSQL data directory stays on the root mirror. It is already redundant, the artifact that
+has actually been restored is the dump pair (which does relocate), and a database is the one thing
+not worth putting behind a loop device without a reason. Caddy, nginx, PostgREST, the units and
+`/srv/vault/app` are redeployable from this checkout and are not data; they do not move either.
+
 The shared JWT secret is minted once during a greenfield install and lives only in
 `/srv/fedbackup/ferrodiode-pcb-testbench/server/config/secrets.env` (0600, `fedbackup`, `etc_t`);
 it is not in a pg_dump and must never be regenerated. PostgREST and fed_storage verify the same

@@ -4,6 +4,13 @@
 #   sudo bash deploy/relocate-fedbench-data.sh --check
 #   sudo bash deploy/relocate-fedbench-data.sh
 #   sudo bash deploy/relocate-fedbench-data.sh --dest /storage
+#   sudo bash deploy/relocate-fedbench-data.sh --dest /storage/vault   (after vault-volume-install.sh)
+#
+# PREFERRED DESTINATION: /storage/vault, the 512 GiB reserved volume vault-volume-install.sh creates.
+# Plain /storage works and is still mirrored, but it is a directory on the array the sims fill; the
+# reserved volume is the same array with a floor the sims cannot take and a ceiling the vault cannot
+# cross. The assertions below accept either: a loop mount is its own filesystem, and the RAID check
+# follows the loop device back to the array holding its image.
 #
 # WHY. Three trees are in the wrong place on edaserver:
 #
@@ -85,7 +92,21 @@ else
 fi
 
 # Redundancy is the whole point of choosing this destination; say so out loud rather than assume it.
-dest_src=$(findmnt -no SOURCE "$DEST" 2>/dev/null | sed 's|/dev/||')
+# The destination may be the loop-mounted image vault-volume-install.sh creates (/storage/vault): then
+# the mount's SOURCE is /dev/loopN, and the array is whatever holds the backing file. Follow it,
+# or the check warns about the one destination this script is now expected to be given.
+dest_src=$(findmnt -no SOURCE "$DEST" 2>/dev/null)
+case "$dest_src" in
+  /dev/loop*)
+    backing=$(losetup -nO BACK-FILE "$dest_src" 2>/dev/null)
+    if [ -n "$backing" ] && [ -e "$backing" ]; then
+      ok "$DEST is a loop mount of $backing"
+      dest_src=$(findmnt -no SOURCE --target "$backing" 2>/dev/null)
+    else
+      warn "$DEST is a loop device whose backing file could not be resolved"
+    fi ;;
+esac
+dest_src=${dest_src#/dev/}
 if grep -q "^${dest_src} : active raid" /proc/mdstat 2>/dev/null; then
   ok "$DEST is on a RAID array ($(grep "^${dest_src} :" /proc/mdstat | awk '{print $3}'))"
 else

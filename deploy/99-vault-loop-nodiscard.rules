@@ -1,0 +1,15 @@
+# Refuse discards on the loop device backing the vault's reserved volume.
+#
+# The reservation in /storage/vault.img is real only while every block of the file stays allocated.
+# A discard from the inner filesystem -- online (the discard mount option), or offline (fstrim, which
+# RHEL 9 runs weekly against every mounted filesystem) -- reaches the loop driver as a hole punch on
+# the backing file, and the "reserved" 512 GiB shrinks by exactly the amount the vault is not using.
+# Nothing reports it; df on /storage simply gains free space the sims can then take.
+#
+# Setting discard_max_bytes to 0 makes the block layer answer "discard not supported" for this one
+# device, whatever the filesystem above it asks for. Matched on the backing file, not the loop
+# number, because mount(8) picks whichever /dev/loopN is free.
+#
+# Installed by vault-volume-install.sh to /etc/udev/rules.d/. Undo: remove it, udevadm control
+# --reload, and the next attach gets the driver default again.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop[0-9]*", ATTR{loop/backing_file}=="/storage/vault.img", ATTR{queue/discard_max_bytes}="0"

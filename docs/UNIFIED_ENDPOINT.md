@@ -847,6 +847,23 @@ applied**; corrections go in a later migration or in the documents, which is whe
 The comment's conclusion — reference the bench objects rather than copying them — was right for a
 reason that had nothing to do with capacity, and that reasoning is intact.
 
+### Where the vault lives on the array, and why it is a file (2026-09-16)
+
+`lsblk` answered the layout question: `md125` is the two 4 TB NVMe in RAID1 with one XFS written
+straight onto the md device — no partition table, no LVM (`pvs` is empty), quotas off. That rules
+out the obvious "partition off 512 GB for the vault": XFS cannot shrink, so any real partition or
+logical volume means evacuating 824 GB of EDA work and rebuilding the array. The reservation is
+instead a 512 GiB `fallocate`d image at `/storage/vault.img`, formatted XFS and loop-mounted at
+`/storage/vault` — blocks taken from the array up front, so the sims cannot fill the vault's space
+and the vault cannot fill theirs. `deploy/vault-volume-install.sh` builds it and proves the three
+discard defences that keep the reservation from leaking; `deploy/README.md` has the reasoning and
+the order of operations. Then `relocate-fedbench-data.sh --dest /storage/vault` moves the object
+store, the backups and the cold archive onto it with the old paths bind-mounted back. Postgres stays
+on the root mirror, as that script already argues.
+
+This changes nothing about the second-copy gate. Archive and live objects now share one mirror,
+which the restic copy to the NAS is what answers — a mirror is still not a backup.
+
 ### Phase 1 is DONE on edaserver, 2026-09-11
 
 `fedbench` exists on the PGDG 17.10 cluster, owned by `agnidata`, and the full chain is applied:

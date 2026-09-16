@@ -34,7 +34,16 @@ EnvironmentFile=/etc/restic/backup.env
 # DELIBERATELY NOT INCLUDED: /var/lib/pgsql/17/data. A file-level copy of a RUNNING cluster is
 # torn, and restoring it produces a database that may start and may be silently wrong. The dump
 # pair in /srv/fedbench/backups is the artifact that has actually been restored and verified.
-ExecStart=/usr/bin/restic backup /storage /srv/fedbench/backups /srv/nextcloud/fedbench --exclude-caches --tag scheduled
+#
+# EXCLUDED: /storage/vault.img, the 512 GiB preallocated image that vault-volume-install.sh
+# loop-mounts at /storage/vault. Restic descends into mount points by default, so the FILES on that
+# volume are already in this backup by way of /storage -- and are what a restore needs. The image
+# itself would add a 512 GiB read every night (its mtime changes whenever the vault writes) to store
+# the same bytes a second time as one opaque blob. Once the fedbench trees relocate onto that
+# volume, the two explicit paths after /storage become bind mounts of directories restic already
+# saw, and restic records them as it always has; they stay listed so this unit does not depend on
+# the relocation having happened.
+ExecStart=/usr/bin/restic backup /storage /srv/fedbench/backups /srv/nextcloud/fedbench --exclude=/storage/vault.img --exclude-caches --tag scheduled
 # REMOVED: ExecStartPost=/usr/bin/restic forget ... --prune
 #
 # That is why this unit reported `failed` on all 45 of the last 45 nights while saving all 45

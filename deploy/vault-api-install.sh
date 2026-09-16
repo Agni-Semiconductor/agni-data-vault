@@ -194,6 +194,25 @@ if [ -s "$ENVFILE" ]; then
     "")                         bad "VAULT_STORAGE_URL is not set in $ENVFILE" ;;
     *)                          bad "VAULT_STORAGE_URL=$st must end in /storage/v1 -- storage.js appends object paths to it and does not add the prefix" ;;
   esac
+  # THE ONE VALUE THAT IS ADDED IF ABSENT. VAULT_MCP_READ_KEY (2026-09-16) is a second bearer key
+  # that only the MCP endpoint accepts, for read-only consumers such as agni-connect's agent, so
+  # they never hold VAULT_API_KEY, which also opens REST writes. Appending a new line touches no
+  # existing credential; an existing value, rotated or not, is left exactly as it is.
+  if grep -q '^VAULT_MCP_READ_KEY=' "$ENVFILE"; then
+    ok "VAULT_MCP_READ_KEY is present (left alone)"
+  else
+    READKEY=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)
+    if [ -n "$READKEY" ] && {
+         printf '# Read-only key for the MCP endpoint only (/mcp, /api/mcp); the REST API never reads it.\n'
+         printf 'VAULT_MCP_READ_KEY=%s\n' "$READKEY"
+       } >> "$ENVFILE"; then
+      ok "appended a generated VAULT_MCP_READ_KEY (value not printed)"
+      warn "restart vault-api to load it; read it with: sudo grep VAULT_MCP_READ_KEY $ENVFILE"
+    else
+      bad "could not append VAULT_MCP_READ_KEY to $ENVFILE"
+    fi
+    unset READKEY
+  fi
 else
   SEC=$(grep -m1 '^PGRST_JWT_SECRET=' "$SECRETS" | cut -d= -f2- | tr -d '"')
   # A long-lived service token. Minted here rather than by tools/mint_service_jwt.py, which lives in
@@ -214,6 +233,7 @@ PYEOF
     bad "could not mint the vault_service token -- NOT writing $ENVFILE"
   else
     APIKEY=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)
+    READKEY=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)
     (
       umask 077
       {
@@ -228,11 +248,13 @@ PYEOF
         printf 'VAULT_STORAGE_URL=http://127.0.0.1:8087/storage/v1\n'
         printf 'VAULT_SERVICE_JWT=%s\n' "$TOKEN"
         printf 'VAULT_API_KEY=%s\n' "$APIKEY"
+        printf '# Read-only key for the MCP endpoint only (/mcp, /api/mcp); the REST API never reads it.\n'
+        printf 'VAULT_MCP_READ_KEY=%s\n' "$READKEY"
         printf 'PORT=%s\n' "$PORT"
       } > "$ENVFILE"
     )
     chown root:"$SVCUSER" "$ENVFILE"; chmod 0640 "$ENVFILE"
-    unset TOKEN APIKEY
+    unset TOKEN APIKEY READKEY
     ok "wrote $ENVFILE (0640 root:$SVCUSER, values not printed)"
     warn "VAULT_API_KEY was generated. Read it with: sudo grep VAULT_API_KEY $ENVFILE"
     warn "Cloudflare Access variables are absent -- /api human auth is not configured, by decision (tailnet only)"

@@ -999,9 +999,13 @@ translation to the `meta.` form the query layer expects happens here. `search` i
 `q` for the same reason — passing `search` through would have been accepted and ignored.
 
 **Authentication** is `Authorization: Bearer $VAULT_API_KEY`, compared with `timingSafeEqual`, the
-same secret as the REST API. A Cloudflare Access assertion is deliberately NOT accepted: a browser
-session is the wrong credential for a machine client. An unset `VAULT_API_KEY` is a 500, never an
-open endpoint.
+same secret as the REST API — **or** `VAULT_MCP_READ_KEY`, a second, optional key that only this
+endpoint accepts (added 2026-09-16 for agni-connect's agent). The tools are read-only by
+construction, but `VAULT_API_KEY` also opens the REST write path, so a read-only consumer must never
+hold it; the reader key is a credential `api/_lib/auth.js` has no reference to, which
+`tests/mcpServer.test.ts` asserts by grep. A Cloudflare Access assertion is deliberately NOT
+accepted: a browser session is the wrong credential for a machine client. With neither key set the
+endpoint is a 500, never open.
 
 **Stateless.** One `Server` and one transport per request, no session ids. Every tool is a read
 that answers and finishes, so there is nothing to notify a client about and no session state worth
@@ -1018,6 +1022,7 @@ only.
 | var | where | notes |
 |---|---|---|
 | `VAULT_SITE_URL` | server | optional; the site origin used to build the "Open in the vault" URL in every MCP payload. Unset means the payload carries a path rather than a full link. |
+| `VAULT_MCP_READ_KEY` | server | optional; a second bearer key accepted only at `/mcp` and `/api/mcp`, never by the REST API. For read-only consumers (agni-connect's agent). `openssl rand -hex 32`; restart `vault-api` after adding it. |
 
 `VAULT_MCP_URL` is a **client** variable read by `.mcp.json`, not by the server. It defaults to
 `http://127.0.0.1:8099/mcp` so a local checkout works with no configuration.

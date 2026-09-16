@@ -72,7 +72,7 @@ There are five ways to read measurement data. Pick by who is asking.
 | connect-api, if you would rather write SQL | libpq to `fedbench` as a **login role granted `connect_read`** | Postgres password, `0640` env file | No `Accept-Profile` footgun; same seven views; same read-only limits. Ask Owen to create the login role. |
 | A dev on a tailnet laptop, debugging | `https://edaserver.tailcb2a72.ts.net/rest/v1/<view>` | `connect_read` JWT | Same views, same header. Use the **full** hostname; `https://edaserver` can never have a valid certificate. |
 | agni-connect's own model / agent | **agni-connect's own MCP server**, in connect-api at `127.0.0.1:8098/api/mcp`, reading `connect.*` | `connect_read` JWT (server-side); your own MCP key for clients | Your instructions, your tools, your context. See §7b. |
-| A model wanting the vault's own MCP tools | `POST https://edaserver.tailcb2a72.ts.net/api/mcp` | today **`VAULT_API_KEY`** | Read-only by construction (seven tools), **but the key is the vault's full machine key, which the REST API also accepts for writes.** Not for agni-connect until a read-only MCP key exists on the vault side; see §7b. |
+| Your agent wanting the vault's own MCP tools | `POST https://edaserver.tailcb2a72.ts.net/api/mcp` | **`VAULT_MCP_READ_KEY`** (ask Owen) | Read-only by construction (seven tools). The reader key opens only this endpoint; `VAULT_API_KEY` also opens REST writes and is never yours. See §7b. |
 | Anything wanting the vault's application API (`/api/samples`, `/api/bench/*`, …) | `https://edaserver.tailcb2a72.ts.net/api/*` | `VAULT_API_KEY` | That is the vault app's surface, not yours. Nothing in it is promised to you; use `connect` instead. |
 
 **Rule: agni-connect holds exactly one credential for measurement data, a `connect_read` token.**
@@ -307,12 +307,21 @@ reference implementation worth copying wholesale), different content:
 not already granted. Surface `meta_status`, `skipped`, `extractor_version` and `upload_state` in
 the payloads rather than hiding them, for the reasons in §5.
 
-**If you also want the vault's own MCP tools available to your agent** (they know the live field
-definitions and the vault's UI URLs, which `connect` does not carry): that requires a **read-only
-key accepted only at `/api/mcp`** on the vault side, distinct from `VAULT_API_KEY`, so the REST
-write path never accepts it. It is a small, contained change to `server/mcp/server.mjs`
-(`authorize` checks a second env var) plus the env-parity test; it is **not built yet** and is
-Owen's call. Until it exists, do not configure the vault MCP in agni-connect.
+**The vault's own MCP tools are also available to your agent, with a reader key.** They know the
+live field definitions and the vault's page URLs, which `connect` does not carry. As of 2026-09-16
+the vault's MCP endpoint accepts a second credential, `VAULT_MCP_READ_KEY`, which **only**
+`/api/mcp` honours; the REST write path has no reference to it (asserted by test). Ask Owen for
+that key, never for `VAULT_API_KEY`. Configure it as a second MCP server in your agent:
+
+```
+url:    https://edaserver.tailcb2a72.ts.net/api/mcp     (or http://127.0.0.1:8099/api/mcp from the box)
+header: Authorization: Bearer <VAULT_MCP_READ_KEY>
+```
+
+Its seven tools are `vault_schema`, `vault_stats`, `list_samples`, `get_sample`,
+`list_measurements`, `get_measurement`, `list_files`. Its instructions are the vault's, and they
+will tell your agent to call `vault_schema` before filtering; that is correct for that server. Your
+own server (above) carries your instructions. Two servers, two personas, one agent.
 
 ## 8. agni-connect's own data
 
@@ -428,6 +437,6 @@ Your API port:     127.0.0.1:8098
 Your database:     agni_devops (libpq), roles prefixed connect_*
 Vault app API:     {origin}/api/*   (VAULT_API_KEY; not yours)
 Your MCP:          POST 127.0.0.1:8098/api/mcp  (your key, your instructions, reads connect.* + agni_devops)
-Vault MCP:         POST {origin}/api/mcp   (VAULT_API_KEY today; a read-only key is not built yet)
+Vault MCP:         POST {origin}/api/mcp   (VAULT_MCP_READ_KEY; read-only tools; the vault's instructions)
 Real psql:         /usr/pgsql-17/bin/psql
 ```

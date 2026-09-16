@@ -184,6 +184,17 @@ snapshots (paths `/storage`, `/srv/nextcloud`) form a group that stops receiving
 keep-N rules retain the newest N of that group indefinitely, so a few dozen old snapshots stay
 until someone forgets them by hand. Harmless, and deliberate over widening the policy.
 
+**The reservation is re-proven every morning.** The installer copies itself to
+`/usr/local/bin/vault-volume-install.sh` and installs `vault-volume-verify.timer` (05:20 daily,
+`OnFailure=fedbench-alert@`), which runs `--verify`: the proof step alone, read-only, judged against
+the image's own size. It fails on a lost allocation with the exact byte deficit (a 256 MiB hole in a
+16 GiB test image printed as "16G of 16G" before that was fixed), on `discard_max_bytes` no longer
+being zero, and on the weekly `fstrim` invocation listing the mount; a missing restic exclude is a
+warning there, not a failure, because that is a cost and not a leak. The installer also leaves
+`/storage/README-vault.img.txt` beside the image so that a 512 GiB root-owned file at the top of the
+EDA array is never mistaken for junk. Re-running the installer on an installed volume is safe and is
+how both of those arrive on a box that predates them.
+
 The PostgreSQL data directory stays on the root mirror. It is already redundant, the artifact that
 has actually been restored is the dump pair (which does relocate), and a database is the one thing
 not worth putting behind a loop device without a reason. Caddy, nginx, PostgREST, the units and
@@ -356,6 +367,8 @@ authenticates rather than relying on the name being unguessable.
   `http://127.0.0.1:8087/storage/v1`; `storage.js` appends object paths directly.
 - `VAULT_SERVICE_JWT`: server, HS256, `role: vault_service`, minted by `tools/mint_service_jwt.py --role`.
 - `VAULT_API_KEY`: server, unchanged from v1.
+- `VAULT_MCP_READ_KEY`: server, optional. Accepted only by `/mcp` and `/api/mcp`; the REST API
+  never reads it. For read-only MCP consumers such as agni-connect's agent.
 - `VAULT_ACCESS_TEAM_URL`: server, `https://<team>.cloudflareaccess.com`.
 - `VAULT_ACCESS_AUD`: server, the Access application's audience tag.
 - `VAULT_EMAIL_DOMAIN`: server, checked against the `hd` claim rather than the email suffix.
@@ -374,9 +387,14 @@ one that reaches it through the proxy, since only `/api/*` is proxied. Read-only
 are `vault_schema`, `vault_stats`, `list_samples`, `get_sample`, `list_measurements`,
 `get_measurement` and `list_files`.
 
-Credential: `Authorization: Bearer $VAULT_API_KEY` -- the same key machine clients already use, so
-there is no second secret to rotate. A Cloudflare Access assertion is not accepted here; a browser
-session is the wrong credential for a machine client.
+Credential: `Authorization: Bearer $VAULT_API_KEY` -- the same key machine clients already use --
+**or** `VAULT_MCP_READ_KEY`, an optional second key that only the MCP endpoint accepts. The tools
+are read-only by construction, but the API key also opens the REST write path, so another product's
+agent (agni-connect's) gets the reader key and never the API key. `vault-api-install.sh` appends a
+generated `VAULT_MCP_READ_KEY` to an existing `/etc/vault/vault-api.env` that lacks one, without
+touching any other line; restart `vault-api` afterwards. Read it with
+`sudo grep VAULT_MCP_READ_KEY /etc/vault/vault-api.env`. A Cloudflare Access assertion is not
+accepted here; a browser session is the wrong credential for a machine client.
 
 The repo's `.mcp.json` points at `http://127.0.0.1:8099/mcp` by default so a local checkout works
 with nothing set. Against the box, set both:

@@ -1,0 +1,29 @@
+# Prove, daily, that the vault's reserved volume is still what it was installed as.
+#
+# The reservation in /storage/vault.img is a promise kept by three things nobody looks at: the
+# image's blocks staying allocated, the udev rule keeping discard_max_bytes at 0 on the loop device,
+# and the weekly fstrim skipping the mount. If any of them stops being true the image starts to
+# shrink and df on /storage simply gets friendlier -- no error, no log line, no failed unit. This
+# runs the installer's own proof step (--verify: read-only, changes nothing) and fails loudly.
+#
+# Run by vault-volume-verify.timer -- enable the TIMER, not this unit.
+#
+# The script is the copy vault-volume-install.sh installs at /usr/local/bin, not the checkout:
+# executing from /srv/agni-data-vault would inherit whatever label that tree carries, and systemd
+# reports a label it may not exec as 203/EXEC, which reads as a missing file.
+[Unit]
+Description=Verify the vault volume's reservation and discard protection
+Requires=storage-vault.mount
+After=storage-vault.mount
+OnFailure=fedbench-alert@%n.service
+
+[Service]
+Type=oneshot
+# Root: it reads /sys/block/loop*/queue and the image's stat, and runs fstrim --dry-run.
+ExecStart=/usr/local/bin/vault-volume-install.sh --verify
+# Read-only by contract; enforce it anyway.
+ProtectSystem=strict
+ReadOnlyPaths=/storage
+PrivateTmp=true
+NoNewPrivileges=true
+TimeoutStartSec=120s

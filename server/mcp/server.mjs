@@ -27,18 +27,35 @@ import { TOOLS, TOOLS_BY_NAME } from './tools.mjs'
  * JSON-RPC endpoint. What is reused is the part that matters: timing-safe comparison against
  * VAULT_API_KEY, so there is still exactly one secret to rotate.
  */
-export function authorize(req) {
-  const expected = process.env.VAULT_API_KEY
-  if (!expected) return { ok: false, status: 500, message: 'VAULT_API_KEY is not set on the server' }
-  const header = req.headers?.authorization || ''
-  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
+function sameSecret(token, expected) {
   const a = Buffer.from(token)
   const b = Buffer.from(expected)
   // Length is checked first because timingSafeEqual throws on a mismatch rather than returning
   // false. The length of the supplied token is not a secret; its contents are.
-  const ok = a.length === b.length && crypto.timingSafeEqual(a, b)
-  if (!ok) return { ok: false, status: 401, message: 'Provide the vault API key as a bearer token' }
-  return { ok: true }
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
+}
+
+/**
+ * Two keys open this endpoint, and only this endpoint accepts the second.
+ *
+ * VAULT_API_KEY is the vault's machine key: the REST API accepts it for writes, so handing it to
+ * another product's agent hands that product write access to the vault by way of a different URL.
+ * VAULT_MCP_READ_KEY exists so agni-connect's agent (and any other read-only consumer) can reach
+ * these seven read-only tools with a credential that api/_lib/auth.js has never heard of. The REST
+ * path does not read it; there is nothing to misconfigure there. It is optional: unset, only the
+ * API key works, exactly as before.
+ *
+ * Fail closed: with neither key configured the endpoint is a 500, never open.
+ */
+export function authorize(req) {
+  const apiKey = process.env.VAULT_API_KEY
+  const readKey = process.env.VAULT_MCP_READ_KEY
+  if (!apiKey && !readKey) return { ok: false, status: 500, message: 'VAULT_API_KEY is not set on the server' }
+  const header = req.headers?.authorization || ''
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
+  if (apiKey && sameSecret(token, apiKey)) return { ok: true, principal: 'vault' }
+  if (readKey && sameSecret(token, readKey)) return { ok: true, principal: 'reader' }
+  return { ok: false, status: 401, message: 'Provide the vault API key as a bearer token' }
 }
 
 export function createMcpServer() {

@@ -1,0 +1,15 @@
+# Companion timer for vault-volume-verify.service. THIS is the unit you enable.
+#
+# Daily at 05:20: after the 04:00 restic backup and its jitter, after the 04:40 certificate renewal,
+# before the working day. Persistent, because a reservation check that silently skips the day the
+# box was off is a check with a hole in it exactly when the box was being worked on.
+[Unit]
+Description=Daily verification of the vault volume's reservation
+
+[Timer]
+OnCalendar=*-*-* 05:20:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

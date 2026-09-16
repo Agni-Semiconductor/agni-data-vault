@@ -6,7 +6,48 @@ import { authorize, createMcpServer } from '../server/mcp/server.mjs';
 
 const req = (authorization) => ({ headers: authorization ? { authorization } : {} });
 const original = process.env.VAULT_API_KEY;
-afterEach(() => { if (original === undefined) delete process.env.VAULT_API_KEY; else process.env.VAULT_API_KEY = original; });
+const originalRead = process.env.VAULT_MCP_READ_KEY;
+afterEach(() => {
+  if (original === undefined) delete process.env.VAULT_API_KEY; else process.env.VAULT_API_KEY = original;
+  if (originalRead === undefined) delete process.env.VAULT_MCP_READ_KEY; else process.env.VAULT_MCP_READ_KEY = originalRead;
+});
+
+describe('the read-only MCP key', () => {
+  it('opens the MCP endpoint and names its principal', () => {
+    process.env.VAULT_API_KEY = 'the-vault-key';
+    process.env.VAULT_MCP_READ_KEY = 'the-reader-key';
+    expect(authorize(req('Bearer the-reader-key'))).toEqual({ ok: true, principal: 'reader' });
+    expect(authorize(req('Bearer the-vault-key'))).toEqual({ ok: true, principal: 'vault' });
+  });
+
+  it('is never read by the REST auth path, so it cannot become a write credential', () => {
+    // The whole point of a second key is that api/_lib/auth.js has no reference to it. A grep is
+    // the right test: a future "let the reader key work everywhere" edit fails here by name.
+    const rest = readFileSync(resolve(process.cwd(), 'api/_lib/auth.js'), 'utf8');
+    expect(rest).not.toContain('VAULT_MCP_READ_KEY');
+  });
+
+  it('is optional: unset, only the API key works, as before', () => {
+    process.env.VAULT_API_KEY = 'the-vault-key';
+    delete process.env.VAULT_MCP_READ_KEY;
+    expect(authorize(req('Bearer the-vault-key')).ok).toBe(true);
+    expect(authorize(req('Bearer the-reader-key')).ok).toBe(false);
+  });
+
+  it('works alone, and a wrong or prefix token is still refused', () => {
+    delete process.env.VAULT_API_KEY;
+    process.env.VAULT_MCP_READ_KEY = 'the-reader-key';
+    expect(authorize(req('Bearer the-reader-key')).ok).toBe(true);
+    expect(authorize(req('Bearer the-reader')).ok).toBe(false);
+    expect(authorize(req('Bearer the-reader-key-and-more')).status).toBe(401);
+  });
+
+  it('with neither key set the endpoint is a 500, never open', () => {
+    delete process.env.VAULT_API_KEY;
+    delete process.env.VAULT_MCP_READ_KEY;
+    expect(authorize(req('Bearer anything')).status).toBe(500);
+  });
+});
 
 describe('who may call the MCP endpoint', () => {
   it('accepts the vault API key as a bearer token', () => {

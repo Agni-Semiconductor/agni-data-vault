@@ -5,6 +5,7 @@ set -uo pipefail
 #   sudo bash deploy/vault-volume-install.sh --check
 #   sudo bash deploy/vault-volume-install.sh
 #   sudo bash deploy/vault-volume-install.sh --size 512G
+#   sudo /usr/local/bin/vault-volume-install.sh --verify     (what the daily timer runs; read-only)
 #
 # WHY A FILE AND NOT A PARTITION. /storage is md125: two 4 TB NVMe in RAID1, the array formatted
 # directly as one XFS, no partition table on the md device and no LVM under it (verified on the box
@@ -23,7 +24,7 @@ set -uo pipefail
 # free, the loop driver punches a hole in the image and the "reserved" space goes back to the array.
 # Online discard is off (nodiscard), RHEL's weekly fstrim.timer is told to skip the mount
 # (X-fstrim.notrim), and a udev rule zeroes discard_max_bytes on the loop device so a hand-run fstrim
-# gets "not supported". Step 10 proves all three, because a reservation that leaks is worse than none.
+# gets "not supported". The proof step (12, and --verify daily) checks all three, because a reservation that leaks is worse than none.
 #
 # WHAT THIS DOES NOT DO. It moves no data. Run relocate-fedbench-data.sh --dest /storage/vault
 # afterwards; its assertions accept a loop mount. It does not touch the PostgreSQL data directory,
@@ -58,6 +59,7 @@ PRUNE_UNIT=restic-prune.service
 PRUNE_TIMER=restic-prune.timer
 ALERT_TEMPLATE=fedbench-alert@.service
 RESTIC=1
+VERIFY=0
 # Overridable only so the container harness (no md module, hence no /proc/mdstat) can exercise
 # every step against a fake. On the box, leave it alone.
 MDSTAT=${MDSTAT:-/proc/mdstat}
@@ -73,9 +75,10 @@ step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 iec()  { numfmt --to=iec "$1" 2>/dev/null || echo "$1 bytes"; }
 
 usage() {
-  sed -n '3,8p' "$0"
+  sed -n '3,9p' "$0"
   printf '\nUsage: sudo bash %s [--size 512G] [--check] [--no-restic]\n' "$0"
   printf '--no-restic leaves restic-backup.service exactly as it is and skips the prune split (step 7).\n'
+  printf '--verify    runs only the proof against the installed volume, read-only; the daily timer uses it.\n'
   printf 'The image path (%s), mount point (%s) and unit names are fixed: the mount unit and the udev\n' "$IMAGE" "$MOUNT"
   printf 'rule in the checkout both name them, and one flag cannot change three files.\n'
 }
@@ -87,6 +90,7 @@ while [ $# -gt 0 ]; do
       SIZE=$2; shift 2 ;;
     --check) CHECK=1; shift ;;
     --no-restic) RESTIC=0; shift ;;
+    --verify) VERIFY=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -99,6 +103,106 @@ case "$SIZE_BYTES" in
   ''|*[!0-9]*) echo "--size must be a size numfmt understands, such as 512G" >&2; exit 2 ;;
 esac
 [ "$SIZE_BYTES" -ge $((16 * 1024 * 1024 * 1024)) ] || { echo "--size below 16G makes no sense here" >&2; exit 2; }
+
+# The proof. Also what --verify runs alone, read-only, from the daily timer.
+prove_volume() {
+  # The image's own apparent size is the reference: --verify (the timer) passes no --size, and the
+  # reservation must be judged against what was installed, not against a default.
+  img_bytes=$(stat -c %s "$IMAGE" 2>/dev/null || echo "$SIZE_BYTES")
+  if findmnt -no TARGET "$MOUNT" >/dev/null 2>&1; then
+    loopdev=$(findmnt -no SOURCE "$MOUNT")
+    ok "$MOUNT is mounted from $loopdev"
+    losetup -j "$IMAGE" 2>/dev/null | grep -q "^${loopdev}:" && ok "$loopdev is backed by $IMAGE" || bad "$loopdev is not a loop device on $IMAGE"
+    [ "$(findmnt -no FSTYPE "$MOUNT")" = "xfs" ] && ok "filesystem is xfs" || bad "filesystem is $(findmnt -no FSTYPE "$MOUNT"), not xfs"
+    [ "$(stat -c %d "$MOUNT")" != "$(stat -c %d "$ARRAY")" ] && ok "$MOUNT is its own filesystem, not a directory on $ARRAY" \
+      || bad "$MOUNT is on the same filesystem as $ARRAY -- the mount did not take"
+    vol_k=$(df -k --output=size "$MOUNT" 2>/dev/null | tail -1 | tr -d ' ')
+    # XFS keeps a few percent for its log and metadata; the visible size should be within 5% of the image.
+    if [ -n "$vol_k" ] && [ "$vol_k" -ge $((img_bytes / 1024 * 95 / 100)) ]; then
+      ok "df reports $(iec $((vol_k * 1024))) for the volume"
+    else
+      bad "df reports $(iec $((${vol_k:-0} * 1024))) for a $(iec "$img_bytes") image"
+    fi
+    # The reservation is a promise only while the image stays fully allocated. Re-check after mkfs.
+    alloc=$(( $(stat -c %b "$IMAGE") * $(stat -c %B "$IMAGE") ))
+    # Exact bytes, not the rounded iec form: a 256 MiB hole in a 16 GiB image prints as "16G of 16G"
+    # and the harness showed that reads as a passing check that failed for no reason.
+    if [ "$alloc" -ge "$img_bytes" ]; then
+      ok "image still fully allocated ($(iec "$alloc"))"
+    else
+      bad "image has lost allocation: $((img_bytes - alloc)) bytes ($(iec $((img_bytes - alloc)))) short -- $alloc of $img_bytes allocated; something discarded through it"
+    fi
+    # XFS does not print nodiscard: it is the default and only "discard" ever appears. So the proof is
+    # the absence of the word, not the presence of its opposite (a check for "nodiscard" fails on a
+    # correctly mounted volume, as the harness showed).
+    if findmnt -no OPTIONS "$MOUNT" | tr ',' '\n' | grep -qx discard; then
+      bad "mounted with online discard: $(findmnt -no OPTIONS "$MOUNT")"
+    else
+      ok "online discard is off (XFS default; options: $(findmnt -no OPTIONS "$MOUNT"))"
+    fi
+
+    # THE THREE TRIM DEFENCES, each proven, none assumed.
+    lname=${loopdev#/dev/}
+    dmb=$(cat "/sys/block/$lname/queue/discard_max_bytes" 2>/dev/null)
+    if [ "$dmb" = "0" ]; then
+      ok "udev rule applied: $lname reports discard_max_bytes=0 (discards refused at the block layer)"
+    else
+      if [ "$VERIFY" -eq 1 ]; then
+        # Read-only mode: report, do not repair. The timer exists to make this visible.
+        bad "discard_max_bytes is ${dmb:-unreadable} on $lname -- the udev rule is not holding; a trim would deflate the reservation"
+      else
+        # Apply it for this boot regardless, then say the persistent rule did not fire.
+        echo 0 > "/sys/block/$lname/queue/discard_max_bytes" 2>/dev/null \
+          && warn "udev rule did NOT apply (discard_max_bytes was ${dmb:-unreadable}); set to 0 by hand for this boot -- check udevadm test /sys/block/$lname" \
+          || bad "discard_max_bytes is ${dmb:-unreadable} on $lname and could not be zeroed; fstrim would deflate the reservation"
+      fi
+    fi
+    if command -v fstrim >/dev/null 2>&1; then
+      # This is the same invocation RHEL's fstrim.service runs, in dry-run. If the mount appears, the
+      # weekly timer would trim it.
+      # A dry run that lists nothing at all proves nothing (empty output "passes" any negative grep), so
+      # first require that it lists SOME filesystem; the array itself always qualifies.
+      listing=$(fstrim --listed-in /etc/fstab:/proc/self/mountinfo --dry-run --verbose 2>/dev/null)
+      # This proves the OUTCOME -- the timer's own invocation skips the volume -- not which defence
+      # caused it. In the harness the skip was attributable to discard_max_bytes=0; X-fstrim.notrim
+      # could not be shown to register on util-linux 2.37 and is kept as a second layer, not the proof.
+      if [ -z "$listing" ]; then
+        warn "fstrim's dry run listed no filesystems at all; the weekly-timer proof is inconclusive here"
+      elif printf '%s\n' "$listing" | grep -q "^${MOUNT}:"; then
+        bad "fstrim's dry run lists $MOUNT -- the weekly timer would trim it"
+      else
+        ok "fstrim's dry run (the weekly timer's own invocation) lists other filesystems but skips $MOUNT"
+      fi
+    fi
+    systemctl is-enabled --quiet "$MOUNT_UNIT" 2>/dev/null && ok "$MOUNT_UNIT is enabled (survives reboot)" || bad "$MOUNT_UNIT is not enabled"
+    if systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE"; then
+      ok "live $RESTIC_UNIT excludes the image"
+    elif [ "$VERIFY" -eq 1 ]; then
+      # The daily proof is about the reservation. A missing exclude is Owen's restic business and a
+      # cost, not a leak; alerting on it every morning would teach people to ignore the alert.
+      warn "live $RESTIC_UNIT does not exclude the image (restic is managed separately; not a reservation fault)"
+    elif [ "$RESTIC" -eq 1 ]; then
+      bad "live $RESTIC_UNIT does not exclude the image"
+    else
+      warn "live $RESTIC_UNIT does not exclude the image (--no-restic; each nightly run will read the whole image)"
+    fi
+  else
+    bad "$MOUNT is not mounted"
+  fi
+
+}
+
+if [ "$VERIFY" -eq 1 ]; then
+  # Read-only: only the proof runs, and the one repair it can make is disabled.
+  step "Verify -- the installed volume, read-only"
+  prove_volume
+  if [ "$fail" -gt 0 ]; then
+    printf '\n\033[31mVERDICT: volume VERIFY FAILED (%d failure(s), %d warn(s)).\033[0m\n' "$fail" "$warns"
+    exit 1
+  fi
+  printf '\n\033[32mVERDICT: volume verified (%d warn(s)).\033[0m\n' "$warns"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------------------------------
 step "1. Assertions -- the array this reserves from"
@@ -401,72 +505,53 @@ if [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
 fi
 
 # ---------------------------------------------------------------------------------------------------
-step "11. Assertions -- prove the volume is what this script claims"
-if findmnt -no TARGET "$MOUNT" >/dev/null 2>&1; then
-  loopdev=$(findmnt -no SOURCE "$MOUNT")
-  ok "$MOUNT is mounted from $loopdev"
-  losetup -j "$IMAGE" 2>/dev/null | grep -q "^${loopdev}:" && ok "$loopdev is backed by $IMAGE" || bad "$loopdev is not a loop device on $IMAGE"
-  [ "$(findmnt -no FSTYPE "$MOUNT")" = "xfs" ] && ok "filesystem is xfs" || bad "filesystem is $(findmnt -no FSTYPE "$MOUNT"), not xfs"
-  [ "$(stat -c %d "$MOUNT")" != "$(stat -c %d "$ARRAY")" ] && ok "$MOUNT is its own filesystem, not a directory on $ARRAY" \
-    || bad "$MOUNT is on the same filesystem as $ARRAY -- the mount did not take"
-  vol_k=$(df -k --output=size "$MOUNT" 2>/dev/null | tail -1 | tr -d ' ')
-  # XFS keeps a few percent for its log and metadata; the visible size should be within 5% of the image.
-  if [ -n "$vol_k" ] && [ "$vol_k" -ge $((SIZE_BYTES / 1024 * 95 / 100)) ]; then
-    ok "df reports $(iec $((vol_k * 1024))) for the volume"
-  else
-    bad "df reports $(iec $((${vol_k:-0} * 1024))) for a $(iec "$SIZE_BYTES") image"
-  fi
-  # The reservation is a promise only while the image stays fully allocated. Re-check after mkfs.
-  alloc=$(( $(stat -c %b "$IMAGE") * $(stat -c %B "$IMAGE") ))
-  [ "$alloc" -ge "$SIZE_BYTES" ] && ok "image still fully allocated ($(iec "$alloc"))" || bad "image has lost allocation: $(iec "$alloc") of $(iec "$SIZE_BYTES") -- something discarded through it"
-  # XFS does not print nodiscard: it is the default and only "discard" ever appears. So the proof is
-  # the absence of the word, not the presence of its opposite (a check for "nodiscard" fails on a
-  # correctly mounted volume, as the harness showed).
-  if findmnt -no OPTIONS "$MOUNT" | tr ',' '\n' | grep -qx discard; then
-    bad "mounted with online discard: $(findmnt -no OPTIONS "$MOUNT")"
-  else
-    ok "online discard is off (XFS default; options: $(findmnt -no OPTIONS "$MOUNT"))"
-  fi
+step "11. A marker beside the image, and the daily proof"
+# A 512 GiB root-owned file at the top of everyone's EDA array looks like junk to anyone who did not
+# read this script. The marker says what it is and what not to do to it.
+MARKER="$ARRAY/README-vault.img.txt"
+if [ ! -f "$MARKER" ]; then
+  cat > "$MARKER" <<'MARK'
+vault.img is NOT junk. Do not delete, move, truncate, fstrim or "clean up" this file.
 
-  # THE THREE TRIM DEFENCES, each proven, none assumed.
-  lname=${loopdev#/dev/}
-  dmb=$(cat "/sys/block/$lname/queue/discard_max_bytes" 2>/dev/null)
-  if [ "$dmb" = "0" ]; then
-    ok "udev rule applied: $lname reports discard_max_bytes=0 (discards refused at the block layer)"
-  else
-    # Apply it for this boot regardless, then say the persistent rule did not fire.
-    echo 0 > "/sys/block/$lname/queue/discard_max_bytes" 2>/dev/null \
-      && warn "udev rule did NOT apply (discard_max_bytes was ${dmb:-unreadable}); set to 0 by hand for this boot -- check udevadm test /sys/block/$lname" \
-      || bad "discard_max_bytes is ${dmb:-unreadable} on $lname and could not be zeroed; fstrim would deflate the reservation"
-  fi
-  if command -v fstrim >/dev/null 2>&1; then
-    # This is the same invocation RHEL's fstrim.service runs, in dry-run. If the mount appears, the
-    # weekly timer would trim it.
-    # A dry run that lists nothing at all proves nothing (empty output "passes" any negative grep), so
-    # first require that it lists SOME filesystem; the array itself always qualifies.
-    listing=$(fstrim --listed-in /etc/fstab:/proc/self/mountinfo --dry-run --verbose 2>/dev/null)
-    # This proves the OUTCOME -- the timer's own invocation skips the volume -- not which defence
-    # caused it. In the harness the skip was attributable to discard_max_bytes=0; X-fstrim.notrim
-    # could not be shown to register on util-linux 2.37 and is kept as a second layer, not the proof.
-    if [ -z "$listing" ]; then
-      warn "fstrim's dry run listed no filesystems at all; the weekly-timer proof is inconclusive here"
-    elif printf '%s\n' "$listing" | grep -q "^${MOUNT}:"; then
-      bad "fstrim's dry run lists $MOUNT -- the weekly timer would trim it"
-    else
-      ok "fstrim's dry run (the weekly timer's own invocation) lists other filesystems but skips $MOUNT"
-    fi
-  fi
-  systemctl is-enabled --quiet "$MOUNT_UNIT" 2>/dev/null && ok "$MOUNT_UNIT is enabled (survives reboot)" || bad "$MOUNT_UNIT is not enabled"
-  if systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE"; then
-    ok "live $RESTIC_UNIT excludes the image"
-  elif [ "$RESTIC" -eq 1 ]; then
-    bad "live $RESTIC_UNIT does not exclude the image"
-  else
-    warn "live $RESTIC_UNIT does not exclude the image (--no-restic; each nightly run will read the whole image)"
-  fi
+It is the Agni data vault's reserved volume: a preallocated 512 GiB image, formatted XFS and
+loop-mounted at /storage/vault by storage-vault.mount. The vault's object store, database dumps and
+cold archive live inside it (bind-mounted back to /srv/fedbench and /srv/nextcloud/fedbench).
+Deleting it deletes those. Punching holes in it (any discard) silently shrinks the reservation.
+
+Why a file and not a partition: /storage is one XFS straight on the RAID1 md device with no LVM,
+and XFS cannot shrink, so a real partition would mean rebuilding the array.
+
+Owner: Owen Ledger. Source: agni-data-vault/deploy/vault-volume-install.sh (and deploy/README.md).
+Undo, if you really mean it: systemctl disable --now storage-vault.mount, then and only then rm.
+MARK
+  chmod 0644 "$MARKER" && ok "wrote $MARKER"
 else
-  bad "$MOUNT is not mounted"
+  ok "$MARKER already present"
 fi
+
+# The proof runs daily from a timer, using an installed copy of this script. Not the checkout: a
+# script under /srv/agni-data-vault carries whatever label that tree has, and systemd reports a
+# label it may not exec as 203/EXEC, which reads as a missing file.
+install -m 0755 "$0" /usr/local/bin/vault-volume-install.sh && ok "installed /usr/local/bin/vault-volume-install.sh (for --verify)" || bad "could not install the script to /usr/local/bin"
+for u in vault-volume-verify.service vault-volume-verify.timer; do
+  if [ -f "$UNITSRC/$u" ]; then
+    install -m 0644 "$UNITSRC/$u" "$UNITDIR/$u" && ok "installed $UNITDIR/$u" || bad "could not install $u"
+  else
+    bad "$UNITSRC/$u missing"
+  fi
+done
+systemctl daemon-reload
+systemctl enable --now vault-volume-verify.timer >/dev/null 2>&1 && ok "enabled vault-volume-verify.timer (daily 05:20)" || bad "could not enable vault-volume-verify.timer"
+# Run the installed copy once, now, read-only: a timer must be proven the day it is installed, not
+# discovered broken the day it is needed.
+if /usr/local/bin/vault-volume-install.sh --verify >/dev/null 2>&1; then
+  ok "the installed --verify run passes"
+else
+  bad "the installed --verify run FAILS; see: sudo /usr/local/bin/vault-volume-install.sh --verify"
+fi
+
+step "12. Assertions -- prove the volume is what this script claims"
+prove_volume
 
 if [ "$fail" -gt 0 ]; then
   printf '\n\033[31mVERDICT: install FAILED (%d failure(s), %d warn(s)).\033[0m\n' "$fail" "$warns"

@@ -3,6 +3,10 @@
 **Audience:** whoever is writing agni-connect. This is the whole of what you need to read
 measurement data, and the whole of what is promised to you.
 
+> **Operating handoff:** `docs/CONNECT_AGENT_HANDOFF.md` is the step-by-step version of this
+> document for the agent building and running agni-connect — exact requests, the diagnosis table,
+> the column lists, the stand-up order. This file remains the contract and the reasoning.
+
 **Status: the endpoint is LIVE on edaserver** as of 2026-09-11. Database `fedbench` on the PGDG
 17.10 cluster has all 19 migrations applied, `connect_read` created, and the interface verified
 through the HTTP path. `connect_read` reads the seven views and is refused on every base table in

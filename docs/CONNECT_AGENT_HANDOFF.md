@@ -256,8 +256,11 @@ authorizes per bucket and per verb with its own role set. If agni-connect needs 
 a separate, explicit grant. Two buckets exist: `bench` (the testbench's captures, **read-only to
 everyone outside the bench**, delete returns `405` by construction) and `vault`.
 
-Known upstream defects, both open in `ferrodiode-pcb-testbench`: `fed_storage` has no DELETE
-route, and its download hardcodes `application/octet-stream` regardless of the stored type.
+Two behaviours of `fed_storage` worth knowing, both deliberate and tested in
+`ferrodiode-pcb-testbench` (a sweep on 2026-09-16 corrected an earlier claim here that they were
+defects): DELETE exists but is bucket-gated, so a delete on `bench` is a `405` before any auth
+check and only `vault` is deletable; and a download's `Content-Type` is derived from the file
+extension (`.csv`, `.xlsx`, else guessed), not from stored metadata.
 
 ---
 

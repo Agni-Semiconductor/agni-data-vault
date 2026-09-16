@@ -498,7 +498,9 @@ step "10. Label the mount point"
 if [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
   # var_t is what /srv/fedbench carries today and what relocate-fedbench-data.sh applies to the trees
   # it creates underneath, so the services keep exactly the access they have.
-  semanage fcontext -a -t var_t "${MOUNT}(/.*)?" 2>/dev/null \
+  # -a prints "already defined, modifying instead" on stdout on a re-run; that is the expected path,
+  # not news, so it is silenced along with stderr.
+  semanage fcontext -a -t var_t "${MOUNT}(/.*)?" >/dev/null 2>&1 \
     || semanage fcontext -m -t var_t "${MOUNT}(/.*)?" 2>/dev/null \
     || warn "could not record an fcontext rule for $MOUNT"
   restorecon -R "$MOUNT" 2>/dev/null && ok "labelled $MOUNT as var_t" || bad "restorecon failed for $MOUNT"
@@ -558,5 +560,15 @@ if [ "$fail" -gt 0 ]; then
   exit 1
 fi
 printf '\n\033[32mVERDICT: vault volume ready at %s (%d warn(s)).\033[0m\n' "$MOUNT" "$warns"
-printf 'Next: sudo bash %s/relocate-fedbench-data.sh --check --dest %s\n' "$(dirname "$0")" "$MOUNT"
-printf '      then the same without --check, then a backup run and a restore drill before deleting any .pre-relocate tree.\n'
+# The hint depends on where the data is. Before relocation: how to move it. After: what still needs
+# a human, which is only the deletion of the kept originals once the backups have proven themselves.
+if findmnt -no TARGET /srv/fedbench >/dev/null 2>&1 && [ "$(stat -c %d /srv/fedbench 2>/dev/null)" = "$(stat -c %d "$MOUNT")" ]; then
+  printf 'The fedbench trees already live on this volume (bind-mounted back to their old paths).\n'
+  for orig in /srv/fedbench.pre-relocate /srv/nextcloud/fedbench.pre-relocate; do
+    [ -d "$orig" ] && printf 'Kept original still present: %s -- remove it only after a backup run and a restore drill have passed.\n' "$orig"
+  done
+  printf 'Daily proof: vault-volume-verify.timer; run it by hand with: sudo /usr/local/bin/vault-volume-install.sh --verify\n'
+else
+  printf 'Next: sudo bash %s/relocate-fedbench-data.sh --check --dest %s\n' "$(dirname "$0")" "$MOUNT"
+  printf '      then the same without --check, then a backup run and a restore drill before deleting any .pre-relocate tree.\n'
+fi

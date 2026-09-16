@@ -31,9 +31,28 @@ describe('deploy/relocate-fedbench-data.sh', () => {
     // the failure that matters. Proven locally against both shapes: a missing file changes the
     // entry count, a truncated file changes only the byte total, and the check catches each.
     expect(directives, 'entries must be counted on both sides').toMatch(/find "\$src" -xdev \| wc -l/)
-    expect(directives, 'bytes must be compared on both sides').toMatch(/du -sb "\$src"/)
+    // REGULAR-FILE bytes, not `du -sb`. du sums directory st_size too, and on XFS a directory's
+    // size depends on its insertion history: the first run on edaserver (2026-09-16) had 26,839
+    // entries on both sides and a destination 884,456 bytes LARGER, all of it directory inodes.
+    // A byte check that a correct copy cannot pass is not a check.
+    expect(directives, 'bytes must be summed over regular files on the source').toMatch(
+      /find "\$src" -xdev -type f -printf '%s\\n'/,
+    )
+    expect(directives, 'bytes must be summed over regular files on the destination').toMatch(
+      /find "\$dst" -xdev -type f -printf '%s\\n'/,
+    )
+    expect(directives, 'du -sb must not be used as the byte comparison').not.toMatch(/du -sb/)
+    // Counts and sizes cannot see a same-size content change; a checksum dry run can, and its
+    // empty output is the proof. Verified in a container: an identical copy itemizes nothing, a
+    // one-byte flip in a same-size file is reported as `>fc........ path`.
+    expect(directives, 'content must be compared with an rsync checksum dry run').toMatch(
+      /rsync -aHAX --numeric-ids --checksum --dry-run --itemize-changes "\$src"\/ "\$dst"\//,
+    )
     expect(directives, 'a mismatch must be a failure, not a warning').toMatch(
       /VERIFICATION FAILED[\s\S]{0,200}?return 1/,
+    )
+    expect(directives, 'a checksum difference must be a failure that stops the move').toMatch(
+      /checksum pass found differences[\s\S]{0,200}?return 1/,
     )
   })
 

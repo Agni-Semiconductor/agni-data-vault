@@ -29,6 +29,11 @@ set -uo pipefail
 # afterwards; its assertions accept a loop mount. It does not touch the PostgreSQL data directory,
 # which stays on the root mirror -- see relocate-fedbench-data.sh for why.
 #
+# IT DOES NOT TOUCH RESTIC. restic-backup.service is Owen's and is managed separately (his call,
+# 2026-09-16). This script only READS the live unit and reports whether it excludes the image;
+# it never installs, edits or reloads it. Without the exclude, restic reads the whole 512 GiB image
+# every night and stores a torn copy of it -- wasteful, not dangerous -- so that is a warning here.
+#
 # Undo: systemctl disable --now storage-vault.mount; rm /etc/systemd/system/storage-vault.mount
 # /etc/udev/rules.d/99-vault-loop-nodiscard.rules; systemctl daemon-reload; udevadm control --reload.
 # THIS SCRIPT NEVER DELETES THE IMAGE. It holds whatever was relocated onto it.
@@ -62,8 +67,8 @@ iec()  { numfmt --to=iec "$1" 2>/dev/null || echo "$1 bytes"; }
 usage() {
   sed -n '3,8p' "$0"
   printf '\nUsage: sudo bash %s [--size 512G] [--check]\n' "$0"
-  printf 'The image path (%s), mount point (%s) and unit names are fixed: the mount unit, the udev\n' "$IMAGE" "$MOUNT"
-  printf 'rule and the restic exclude in the checkout all name them, and one flag cannot change four files.\n'
+  printf 'The image path (%s), mount point (%s) and unit names are fixed: the mount unit and the udev\n' "$IMAGE" "$MOUNT"
+  printf 'rule in the checkout both name them, and one flag cannot change three files.\n'
 }
 
 while [ $# -gt 0 ]; do
@@ -144,7 +149,7 @@ command -v fstrim >/dev/null 2>&1 && ok "fstrim is available (its dry run is the
   || warn "fstrim is missing; the trim-protection proof in step 10 will be skipped"
 
 step "4. Assertions -- the checkout carries what gets installed"
-for f in "$MOUNT_UNIT" "$UDEV_RULE" "$RESTIC_UNIT"; do
+for f in "$MOUNT_UNIT" "$UDEV_RULE"; do
   [ -f "$UNITSRC/$f" ] && ok "$UNITSRC/$f present" || bad "$UNITSRC/$f missing -- is UNITSRC the vault checkout?"
 done
 if [ -f "$UNITSRC/$MOUNT_UNIT" ]; then
@@ -152,10 +157,6 @@ if [ -f "$UNITSRC/$MOUNT_UNIT" ]; then
   grep -q "^What=$IMAGE\$" "$UNITSRC/$MOUNT_UNIT" && ok "$MOUNT_UNIT mounts $IMAGE" || bad "$MOUNT_UNIT does not name What=$IMAGE"
   grep -q "^Where=$MOUNT\$" "$UNITSRC/$MOUNT_UNIT" && ok "$MOUNT_UNIT mounts at $MOUNT" || bad "$MOUNT_UNIT does not name Where=$MOUNT"
   grep -q "X-fstrim.notrim" "$UNITSRC/$MOUNT_UNIT" && ok "$MOUNT_UNIT carries X-fstrim.notrim" || bad "$MOUNT_UNIT lacks X-fstrim.notrim"
-fi
-if [ -f "$UNITSRC/$RESTIC_UNIT" ]; then
-  grep -q -- "--exclude=$IMAGE" "$UNITSRC/$RESTIC_UNIT" && ok "$RESTIC_UNIT in the checkout excludes $IMAGE" \
-    || bad "$RESTIC_UNIT in the checkout does not exclude $IMAGE -- restic would read the whole image nightly"
 fi
 [ "$(systemd-escape --path --suffix=mount "$MOUNT")" = "$MOUNT_UNIT" ] \
   && ok "unit name $MOUNT_UNIT is what systemd derives from $MOUNT" \
@@ -200,29 +201,16 @@ fi
 [ "$fail" -eq 0 ] || { printf '\n\033[31mRefusing to proceed with %d failed assertion(s).\033[0m\n' "$fail"; exit 1; }
 
 # ---------------------------------------------------------------------------------------------------
-step "7. The restic exclude goes in FIRST"
-# Order matters: the next nightly run after the image exists must already skip it. The live unit is
-# an adopted host unit, so it is replaced from the checkout and the previous copy is kept.
-if systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE"; then
-  ok "live $RESTIC_UNIT already excludes $IMAGE"
+step "7. Restic -- READ ONLY, reported and left alone"
+# restic-backup.service is managed separately by Owen. This step never installs, edits, backs up or
+# reloads it. It only says whether the live unit will skip the image, so the consequence is known.
+if ! systemctl cat "$RESTIC_UNIT" >/dev/null 2>&1; then
+  warn "no live $RESTIC_UNIT on this host; nothing to report"
+elif systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE"; then
+  ok "live $RESTIC_UNIT excludes $IMAGE"
 else
-  stamp=$(date +%Y%m%dT%H%M%S)
-  if [ -f "$UNITDIR/$RESTIC_UNIT" ]; then
-    cp -a "$UNITDIR/$RESTIC_UNIT" "$UNITDIR/$RESTIC_UNIT.bak.$stamp" && ok "kept the previous unit at $UNITDIR/$RESTIC_UNIT.bak.$stamp" \
-      || bad "could not back up the live $RESTIC_UNIT"
-  else
-    warn "no $UNITDIR/$RESTIC_UNIT on this host; installing the checkout's copy"
-  fi
-  if install -m 0644 "$UNITSRC/$RESTIC_UNIT" "$UNITDIR/$RESTIC_UNIT"; then
-    systemctl daemon-reload
-    systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE" \
-      && ok "installed $RESTIC_UNIT with the exclude" \
-      || bad "installed $RESTIC_UNIT but systemd does not show the exclude"
-  else
-    bad "could not install $RESTIC_UNIT"
-  fi
+  warn "live $RESTIC_UNIT does not exclude $IMAGE -- each nightly run will read the whole image; add --exclude=$IMAGE to it when you manage restic (not done here)"
 fi
-[ "$fail" -eq 0 ] || { printf '\n\033[31mStopping before the image is created: restic must exclude it first.\033[0m\n'; exit 1; }
 
 step "8. The udev rule, before any loop device exists to match"
 install -m 0644 "$UNITSRC/$UDEV_RULE" "$UDEVDIR/$UDEV_RULE" && ok "installed $UDEVDIR/$UDEV_RULE" || bad "could not install $UDEV_RULE"
@@ -358,7 +346,9 @@ if findmnt -no TARGET "$MOUNT" >/dev/null 2>&1; then
     fi
   fi
   systemctl is-enabled --quiet "$MOUNT_UNIT" 2>/dev/null && ok "$MOUNT_UNIT is enabled (survives reboot)" || bad "$MOUNT_UNIT is not enabled"
-  systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE" && ok "live $RESTIC_UNIT excludes the image" || bad "live $RESTIC_UNIT does not exclude the image"
+  # Restic is reported, not enforced -- see step 7.
+  systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE" && ok "live $RESTIC_UNIT excludes the image" \
+    || warn "live $RESTIC_UNIT does not exclude the image (managed separately; not changed by this script)"
 else
   bad "$MOUNT is not mounted"
 fi
@@ -369,4 +359,4 @@ if [ "$fail" -gt 0 ]; then
 fi
 printf '\n\033[32mVERDICT: vault volume ready at %s (%d warn(s)).\033[0m\n' "$MOUNT" "$warns"
 printf 'Next: sudo bash %s/relocate-fedbench-data.sh --check --dest %s\n' "$(dirname "$0")" "$MOUNT"
-printf '      then the same without --check, then a restic run and a restore drill before deleting any .pre-relocate tree.\n'
+printf '      then the same without --check, then a backup run and a restore drill before deleting any .pre-relocate tree.\n'

@@ -167,10 +167,12 @@ util-linux 2.37 the harness could not show it registering, so the installer's ch
 outcome, that the timer's own `fstrim --listed-in` invocation skips the volume, without crediting
 that option.
 
-`restic-backup.service` excludes `/storage/vault.img`. Restic descends into mount points, so the
-files on the volume are already in the nightly backup by way of `/storage`; the image would add a
-512 GiB read every night to store the same bytes again as one blob. The installer puts that exclude
-in place **before** creating the image, because the next nightly run must already skip it.
+**The installer does not touch restic.** `restic-backup.service` is managed separately by Owen
+(his call, 2026-09-16); the script only reads the live unit and warns if it lacks
+`--exclude=/storage/vault.img`. The reason that exclude is worth adding when restic is next
+worked on: restic descends into mount points, so the files on the volume are already in the
+nightly backup by way of `/storage`, and the image would add a 512 GiB read every night to store a
+torn copy of the same bytes as one blob. Wasteful, not dangerous; it is a warning, not a gate.
 
 The PostgreSQL data directory stays on the root mirror. It is already redundant, the artifact that
 has actually been restored is the dump pair (which does relocate), and a database is the one thing

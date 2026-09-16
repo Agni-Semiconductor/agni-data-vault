@@ -871,7 +871,7 @@ installed unit adds `/srv/fedbench/backups` and the image exclude, keeps `/srv/n
 and moves the prune to `restic-prune.timer` with the live policy copied verbatim
 (`--keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12`). The previous unit is at
 `restic-backup.service.bak.20260916T095835`. `restic-backup.timer` is still unverified against the
-repo copy. Relocation onto the volume is the next step and had not run at the time of writing.
+repo copy. **Relocation DONE 2026-09-16 (second attempt; the first aborted on a verifier that summed directory inode sizes).** `/srv/fedbench` (1,693 files) and `/srv/nextcloud/fedbench` (26,787 files, 2.75 GB) were rsynced to `/storage/vault/fedbench` and `/storage/vault/fedbench-archive`, checksum-verified, labelled `var_t`, and bind-mounted back over their old paths by `srv-fedbench.mount` and `srv-nextcloud-fedbench.mount`. Originals kept as `*.pre-relocate` until a backup run and a restore drill pass. The cold archive is no longer on the unmirrored disk.
 
 This changes nothing about the second-copy gate. Archive and live objects now share one mirror,
 which the restic copy to the NAS is what answers — a mirror is still not a backup.

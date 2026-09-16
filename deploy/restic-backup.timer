@@ -1,11 +1,11 @@
 # Companion timer for restic-backup.service. THIS is the unit you enable.
 #
-# ADOPTED UNCHANGED. Every directive below is exactly what is already running on edaserver; it is
-# here so the repo holds the whole picture rather than half of it -- the service was being changed
-# and its schedule lived only on the box, which is the same drift this project has been closing
-# everywhere else.
+# UNVERIFIED against the box. This claimed to be "adopted unchanged" from edaserver, but the service
+# it accompanies turned out (2026-09-16) not to match the live unit at all, so this schedule is not
+# trusted until `systemctl cat restic-backup.timer` has been compared with it. Restic is managed by
+# Owen; nothing in this repo installs this file.
 #
-# Three times a day is a deliberate choice for /storage, which is live working data. It stays.
+# Three times a day is a sensible cadence for /storage, which is live working data.
 
 [Unit]
 Description=Restic backup every 8 hours (04:00, 12:00, 20:00)

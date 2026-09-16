@@ -1,48 +1,70 @@
-# Restic backup to the Synology NAS.
+# Restic backup to the Synology NAS -- PROPOSED unit. NOT what is installed.
 #
-# HOST UNIT, ADOPTED INTO THIS REPO. It predates this project and protects more than fedbench --
-# /storage is everyone's EDA work. It lives here so a change to it is reviewable as a diff rather
-# than edited in place on a live box, which is how the defect below survived six weeks.
+# READ THIS FIRST. The live unit at /etc/systemd/system/restic-backup.service was shown by Owen on
+# 2026-09-16 and it is NOT this file. Commit 5470810 (2026-09-15) added this unit describing its
+# changes as already made ("ADDED TWO PATHS", "REMOVED ExecStartPost"); none of them had landed on
+# the box. The live unit, verbatim, with two lines cut short by the pager (`>`):
 #
-# Undo: restore the previous file from /etc/systemd/system/restic-backup.service.bak (the box
-# already keeps .bak and .bak2), systemctl daemon-reload, and disable restic-prune.timer.
+#   [Unit]
+#   Description=Restic backup to Synology NAS
+#   Requires=mnt-nasbackup.mount
+#   After=mnt-nasbackup.mount
+#
+#   [Service]
+#   Type=oneshot
+#   Environment=RESTIC_CACHE_DIR=/var/cache/restic
+#   EnvironmentFile=/etc/restic/backup.env
+#   ExecStart=/usr/bin/restic backup /storage /srv/nextcloud --exclude-caches --tag sc>
+#   ExecStartPost=/usr/bin/restic forget --keep-hourly 24 --keep-daily 14 --keep-weekl>
+#   Nice=10
+#   IOSchedulingClass=idle
+#
+# So, today: /storage and ALL of /srv/nextcloud go off-host. /srv/fedbench (the pg_dump pair and the
+# live object store, on the boot mirror) does NOT. The prune still runs as ExecStartPost, so a prune
+# failure still reports as a backup failure. There is no OnFailure alert. Whether the unit has in
+# fact been failing is UNVERIFIED -- the "45 of 45 nights" claim that used to sit here came from a
+# document, not from this box's journal. Check: journalctl -u restic-backup.service.
+#
+# Restic is managed by Owen. Nothing in this repo installs this file; it is the change proposed to
+# him, and it is applied only by his hand. The four differences from the live unit, each separable:
+#
+#   1. ADD /srv/fedbench/backups. The nightly pg_dump pair is the only artifact that has actually
+#      been restored and verified, and it currently has no off-host copy. Highest value of the four.
+#      After relocate-fedbench-data.sh the path is a bind mount of a directory under /storage that
+#      restic already sees; listing it explicitly costs nothing (dedup) and keeps the backup correct
+#      whether or not the relocation has happened.
+#   2. ADD --exclude=/storage/vault.img. The 512 GiB preallocated image vault-volume-install.sh
+#      loop-mounts at /storage/vault. Restic descends into mount points, so the FILES on it are
+#      already covered by way of /storage; the image itself is a nightly 512 GiB read to store a torn
+#      copy of the same bytes as one blob.
+#   3. MOVE the prune out of ExecStartPost into restic-prune.service on its own weekly timer, so a
+#      prune problem cannot mask a backup result and the two never contend for the repository lock.
+#      The retention flags in that unit must be copied from the live line once it is seen in full.
+#   4. ADD OnFailure=fedbench-alert@%n.service -- only if that template is installed on the box
+#      (alerting-install.sh); otherwise systemd logs a failed enqueue and the alert never fires.
+#
+# KEPT AS LIVE, deliberately: /srv/nextcloud in full. The earlier repo copy narrowed it to
+# /srv/nextcloud/fedbench, which would have silently DROPPED the rest of that disk from the backup.
+#
+# Undo, if applied: restore the file from the .bak Owen takes before copying this in,
+# systemctl daemon-reload, and disable restic-prune.timer.
 
 [Unit]
 Description=Restic backup to Synology NAS
-# Requires=, not Wants=. If the NAS is not mounted the unit must FAIL rather than run, because
-# restic would otherwise create a repository inside the empty mountpoint on the root disk and
-# report success -- an "off-host" backup sitting on the host it is supposed to survive.
+# Requires=, not Wants=: with the NAS unmounted the unit must FAIL rather than run, or restic creates
+# a repository inside the empty mountpoint on the root disk and reports success.
 Requires=mnt-nasbackup.mount
 After=mnt-nasbackup.mount
-# ADDED. Without this a failure lands in a journal nobody reads. That is not hypothetical here:
-# this unit has failed every night for 45 nights and nothing said a word.
+# (4) -- remove this line if fedbench-alert@.service is not installed.
 OnFailure=fedbench-alert@%n.service
 
 [Service]
 Type=oneshot
 Environment=RESTIC_CACHE_DIR=/var/cache/restic
 EnvironmentFile=/etc/restic/backup.env
-# ADDED TWO PATHS. /storage alone covered the 4 TB array -- the EDA work -- and nothing else. The
-# database's nightly dump pair and the Supabase cold archive were both outside it:
-#
-#   /srv/fedbench/backups    on md127 (RAID1)        the pg_dump pair, the only restorable copy
-#   /srv/nextcloud/fedbench  on sda   (SINGLE DISK)  ~55 GB, the seed for the whole migration
-#
-# sda is not an array. A mirror is not a backup in any case: it protects one drive dying, not
-# deletion, corruption, a bad migration, or losing the host.
-#
-# DELIBERATELY NOT INCLUDED: /var/lib/pgsql/17/data. A file-level copy of a RUNNING cluster is
-# torn, and restoring it produces a database that may start and may be silently wrong. The dump
-# pair in /srv/fedbench/backups is the artifact that has actually been restored and verified.
-ExecStart=/usr/bin/restic backup /storage /srv/fedbench/backups /srv/nextcloud/fedbench --exclude-caches --tag scheduled
-# REMOVED: ExecStartPost=/usr/bin/restic forget ... --prune
-#
-# That is why this unit reported `failed` on all 45 of the last 45 nights while saving all 45
-# snapshots. The BACKUP succeeded every time; the prune died on a stale lock from 2026-08-06 and
-# took the unit's exit status with it. A backup whose success is indistinguishable from its failure
-# is worse than one that simply fails, because the alarm stops carrying information.
-#
-# Retention now lives in restic-prune.service, on its own weekly timer. Splitting them means a
-# prune problem cannot mask a backup problem, and neither can mask the other.
+# (1) adds /srv/fedbench/backups; (2) adds the exclude. /storage and /srv/nextcloud are as live.
+# DELIBERATELY NOT INCLUDED: /var/lib/pgsql/17/data. A file-level copy of a running cluster is torn.
+ExecStart=/usr/bin/restic backup /storage /srv/nextcloud /srv/fedbench/backups --exclude=/storage/vault.img --exclude-caches --tag scheduled
+# (3) -- the live ExecStartPost=/usr/bin/restic forget ... --prune moves to restic-prune.service.
 Nice=10
 IOSchedulingClass=idle

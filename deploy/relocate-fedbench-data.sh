@@ -17,9 +17,12 @@
 #   /srv/fedbench          md127  the BOOT mirror -- backups and the object store
 #   /srv/nextcloud/fedbench  sda  a SINGLE DISK, no redundancy -- the ~55 GB cold archive
 #
-# /storage is md125: a 3.7 TB RAID1 pair with 3.0 TB free, not the boot volume, and -- decisively --
-# the only path the nightly restic job copies to the Synology. Moving there is not just tidier; it
-# is what gives this data an off-host copy at all, with no change to the restic unit.
+# /storage is md125: a 3.7 TB RAID1 pair with 3.0 TB free, not the boot volume, and a path the
+# restic job copies to the Synology. The live restic unit (seen 2026-09-16) backs up /storage and all
+# of /srv/nextcloud -- so the cold archive ALREADY has an off-host copy, and its move is about
+# getting off a single unmirrored disk. /srv/fedbench has NO off-host copy today: the pg_dump pair
+# and the object store live only on the boot mirror. Moving it under /storage is what gives them
+# one, with no change to the restic unit.
 #
 # HOW, AND WHY NOT BY EDITING PATHS. Five things name these directories: fedbench-backup.service,
 # fedbench-prune.service, and three scripts in /usr/local/bin. Editing all five is five chances to
@@ -248,7 +251,7 @@ write_mount_unit() {
   cat >"/etc/systemd/system/$name" <<UNIT
 # Bind the relocated fedbench data back to its original path.
 #
-# The data now lives on $what -- a RAID1 array that is not the boot mirror, and the only tree the
+# The data now lives on $what -- a RAID1 array that is not the boot mirror, and a tree the
 # nightly restic job copies off-host. This mount is what lets every unit and script that names
 # $target keep working unedited, which is five fewer places to miss.
 [Unit]
@@ -306,7 +309,7 @@ restart_writers
 trap - EXIT
 
 step "11. What is now covered"
-ok "restic backs up $DEST, so these trees gained an off-host copy with no change to its unit"
+ok "restic backs up /storage, so these trees are now inside its off-host copy with no change to its unit (the fedbench tree had none before)"
 warn "the originals remain at ${SRC_FEDBENCH}.pre-relocate and ${SRC_ARCHIVE}.pre-relocate -- delete them only after a restic run and a restore drill have both passed"
 
 if [ "$fail" -gt 0 ]; then

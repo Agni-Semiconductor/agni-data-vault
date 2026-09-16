@@ -1,10 +1,16 @@
-# Apply restic's retention policy and reclaim space. Split out of restic-backup.service.
+# Apply restic's retention policy and reclaim space -- PROPOSED unit, NOT installed.
 #
-# WHY IT IS ITS OWN UNIT. It used to be an ExecStartPost on the backup, so when it failed it marked
-# the BACKUP failed -- which it did on all 45 of the last 45 nights, on a stale lock from
-# 2026-08-06, while every one of those backups actually succeeded. Two jobs with two different
-# failure modes and two different urgencies do not belong behind one exit status.
+# On the box today (verified 2026-09-16) the prune is still an ExecStartPost on restic-backup.service,
+# so a prune failure marks the BACKUP failed. That is the reason to split it: two jobs with two
+# failure modes and two urgencies do not belong behind one exit status. Whether the live unit has
+# actually been failing that way is UNVERIFIED; the earlier "45 of 45 nights" claim here came from a
+# document, not this box's journal.
 #
+# THE RETENTION FLAGS BELOW ARE A GUESS PAST --keep-daily 14. The live line was cut short by the
+# pager at "--keep-weekl>". Copy the real tail from `cat /etc/systemd/system/restic-backup.service`
+# before this unit is ever enabled; a prune with the wrong policy deletes snapshots.
+#
+# Restic is managed by Owen; this file is applied only by his hand.
 # Undo: systemctl disable --now restic-prune.timer and put the ExecStartPost back on the backup.
 
 [Unit]
@@ -21,7 +27,7 @@ OnFailure=fedbench-alert@%n.service
 Type=oneshot
 Environment=RESTIC_CACHE_DIR=/var/cache/restic
 EnvironmentFile=/etc/restic/backup.env
-# The policy is unchanged from what the backup unit carried.
+# --keep-hourly 24 --keep-daily 14 are confirmed from the live unit; everything after is unverified.
 ExecStart=/usr/bin/restic forget --keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
 Nice=10
 IOSchedulingClass=idle

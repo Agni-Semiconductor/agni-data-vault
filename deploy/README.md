@@ -437,6 +437,43 @@ after the tree is re-staged and `vault-api-install.sh` re-run. The symptom of fo
 Verify it end to end rather than by reading the port: a client that connects but whose first
 `tools/list` returns nothing is the failure worth catching.
 
+## Letting people connect their own Claude with a Google sign-in (Tier 2)
+
+`docs/CONTRACT.md` v2.21 is the specification; this is the operator's part. Nothing here runs a
+model or calls Anthropic: the person's own Claude client is the model, and `vault-api` only issues
+it a token bound to the person after Google Workspace has vouched for them.
+
+1. **A Google OAuth client.** In the Workspace's Google Cloud project: APIs & Services → Credentials
+   → Create credentials → OAuth client ID → *Web application*. Authorised redirect URI:
+   `https://edaserver.<tailnet>.ts.net/oauth/callback`, exactly. Take the client ID and secret.
+   If the consent screen is "Internal", only Workspace accounts can even attempt it, which is the
+   right setting; the server checks `hd` regardless.
+2. **Three lines in `/etc/vault/vault-api.env`**, then `systemctl restart vault-api`:
+   ```
+   VAULT_PUBLIC_ORIGIN=https://edaserver.<tailnet>.ts.net
+   VAULT_OAUTH_GOOGLE_CLIENT_ID=<from step 1>
+   VAULT_OAUTH_GOOGLE_CLIENT_SECRET=<from step 1>
+   ```
+   With any of the three missing the OAuth endpoints answer 404 and the bearer keys behave exactly
+   as before. `VAULT_EMAIL_DOMAIN` must already be set (it is what `hd` is checked against).
+3. **Migration `0119_oauth.sql`** via `deploy/apply-migrations.sh --db fedbench`: three tables in
+   `vault`, RLS on, `vault_service` only. Tokens are stored hashed.
+4. **Caddy** must route `/.well-known/oauth-*` and `/oauth/*` to `vault-api`; `deploy/Caddyfile`
+   does. Re-render it with `caddy-install.sh` (which validates before reloading).
+5. **Prove it** from a tailnet device, unauthenticated, before telling anyone:
+   ```bash
+   curl -s https://edaserver.<tailnet>.ts.net/.well-known/oauth-protected-resource
+   curl -s -o /dev/null -w '%{http_code} %{http_www_authenticate}\n' -X POST https://edaserver.<tailnet>.ts.net/api/mcp -H 'Content-Type: application/json' -d '{}'
+   ```
+   The first prints a JSON document naming `/api/mcp` as the resource. The second prints `401`
+   followed by a `WWW-Authenticate` that points at that document. Then add the MCP server in a
+   Claude client **without** a key: it should open a browser to a Google sign-in and connect.
+
+What a person gets: their own token, an hour at a time with a 30-day rotating refresh, attributed
+to their email in `vault.people` (auto-provisioned as `member`) and in every audit row their tool
+calls produce. Revocation is deleting their rows from `vault.oauth_tokens`. What they do not get:
+any path to the REST write API, which never sees these tokens.
+
 ## RHEL 9 SELinux
 
 These steps are not optional. Their failure modes look like unrelated bugs.

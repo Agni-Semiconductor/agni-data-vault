@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import handler from '../api/handler.js';
 import { health } from '../api/_lib/health.js';
 import { handleMcpRequest } from './mcp/server.mjs';
+import { handleOAuthRequest } from './oauth/server.mjs';
+import { oauthRuntime } from './oauth/runtime.mjs';
 
 const host = '127.0.0.1';
 const port = Number(process.env.PORT || 8099);
@@ -63,7 +65,14 @@ async function serve(req, res) {
     } else {
       const contentTypeHeader = req.headers['content-type'];
       const contentType = (Array.isArray(contentTypeHeader) ? contentTypeHeader[0] : contentTypeHeader || '').split(';', 1)[0].trim().toLowerCase();
-      if (contentType === 'application/json') {
+      // The OAuth token endpoint is form-encoded by specification (RFC 6749 §4.1.3); clients do not
+      // send JSON there. Same size cap and the same one-time read as JSON, for the same reason.
+      if (contentType === 'application/x-www-form-urlencoded') {
+        const result = await readJsonBody(req);
+        if (result.aborted || aborted) return;
+        if (result.tooLarge) { res.status(413).json({ error: { code: 'payload_too_large', message: 'body exceeds 10 MB' } }); return; }
+        req.body = Object.fromEntries(new URLSearchParams(result.buffer.toString('utf8')));
+      } else if (contentType === 'application/json') {
         const contentLength = Number(req.headers['content-length']);
         if (Number.isFinite(contentLength) && contentLength > maxJsonBytes) {
           req.resume();
@@ -88,6 +97,11 @@ async function serve(req, res) {
       if (!aborted) await handleMcpRequest(req, res);
       return;
     }
+
+    // The OAuth authorization server for the MCP endpoint (contract v2.21): discovery documents at
+    // the root, and /oauth/{register,authorize,callback,token}. Ahead of handler() because none of
+    // these carry a vault credential -- they are how a person obtains one.
+    if (!aborted && await handleOAuthRequest(req, res, oauthRuntime().server, oauthRuntime().configured)) return;
 
     if (!aborted) await handler(req, res);
   } catch (error) {

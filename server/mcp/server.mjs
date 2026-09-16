@@ -17,6 +17,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import crypto from 'node:crypto'
 import { TOOLS, TOOLS_BY_NAME } from './tools.mjs'
+import { oauthRuntime } from '../oauth/runtime.mjs'
 
 /**
  * The same credential as the REST API, compared the same way.
@@ -47,7 +48,7 @@ function sameSecret(token, expected) {
  *
  * Fail closed: with neither key configured the endpoint is a 500, never open.
  */
-export function authorize(req) {
+export async function authorize(req) {
   const apiKey = process.env.VAULT_API_KEY
   const readKey = process.env.VAULT_MCP_READ_KEY
   if (!apiKey && !readKey) return { ok: false, status: 500, message: 'VAULT_API_KEY is not set on the server' }
@@ -55,7 +56,24 @@ export function authorize(req) {
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
   if (apiKey && sameSecret(token, apiKey)) return { ok: true, principal: 'vault' }
   if (readKey && sameSecret(token, readKey)) return { ok: true, principal: 'reader' }
+  // Tier 2: a token this server's own OAuth flow issued to a signed-in person (contract v2.21).
+  // Only consulted for the `vlt_` prefix, so a wrong static key never costs a database round trip.
+  if (token.startsWith('vlt_')) {
+    const person = await oauthRuntime().server.authenticateBearer(token)
+    if (person) return { ok: true, principal: 'human', actor: person.email }
+  }
   return { ok: false, status: 401, message: 'Provide the vault API key as a bearer token' }
+}
+
+/**
+ * The 401 that starts the OAuth flow. RFC 9728 §5.1: a client that receives this header knows
+ * where the protected-resource metadata is, and from there where to register and sign in. Only
+ * sent when the flow is actually configured; a header pointing at a 404 is worse than none.
+ */
+export function challengeHeader() {
+  const rt = oauthRuntime()
+  if (!rt.configured) return null
+  return `Bearer resource_metadata="${rt.config.origin}/.well-known/oauth-protected-resource", error="invalid_token"`
 }
 
 export function createMcpServer() {
@@ -89,10 +107,10 @@ export function createMcpServer() {
 }
 
 export async function handleMcpRequest(req, res) {
-  const auth = authorize(req)
+  const auth = await authorize(req)
   if (!auth.ok) {
     res.statusCode = auth.status
-    if (auth.status === 401) res.setHeader('www-authenticate', 'Bearer realm="agni-vault"')
+    if (auth.status === 401) res.setHeader('www-authenticate', challengeHeader() || 'Bearer realm="agni-vault"')
     res.setHeader('content-type', 'application/json')
     // A JSON-RPC error body, because a client that speaks only JSON-RPC should get something it can
     // parse. -32001 is in the implementation-defined server range.

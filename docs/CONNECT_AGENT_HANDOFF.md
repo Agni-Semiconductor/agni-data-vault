@@ -325,6 +325,21 @@ Its seven tools are `vault_schema`, `vault_stats`, `list_samples`, `get_sample`,
 will tell your agent to call `vault_schema` before filtering; that is correct for that server. Your
 own server (above) carries your instructions. Two servers, two personas, one agent.
 
+**People, as opposed to your server process, should not use the reader key.** The vault's MCP
+endpoint is also an OAuth 2.1 authorization server (`docs/CONTRACT.md` v2.21): a person adds it to
+their own Claude client with no key, the client discovers the flow from the 401, a browser opens to
+a Google Workspace sign-in, and the client receives a token bound to that person. That gives the
+vault a name for every tool call and lets Owen revoke one person without rotating anything. Your
+own MCP server should offer the same; the vault's `server/oauth/` is a complete, tested reference
+you can lift (Google as IdP, PKCE-only public clients, hashed rotating tokens), and both products
+can share one Google OAuth client per redirect URI or register their own.
+
+**Where models run, and one decision that is Owen's.** Neither MCP server runs a model. The model
+is whatever Claude client the person or your service uses, and it runs at Anthropic. If agni-connect
+ever wants its API process on edaserver to call a model provider directly, that would be the first
+outbound model call from the box, and it is a deliberate choice Owen makes rather than a default you
+adopt.
+
 ## 8. agni-connect's own data
 
 **Own database on the shared cluster, reached over libpq. Not a schema in `fedbench`.**

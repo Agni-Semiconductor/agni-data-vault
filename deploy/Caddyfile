@@ -49,6 +49,20 @@ edaserver.<tailnet>.ts.net {
 			reverse_proxy 127.0.0.1:8099
 		}
 
+		# Tier 2 identity for the MCP endpoint (docs/CONTRACT.md v2.21). The discovery documents
+		# MUST live at the root per RFC 8414 / RFC 9728 -- a client that gets a 401 from /api/mcp
+		# looks for /.well-known/oauth-protected-resource at the origin, not under /api. The
+		# /oauth/* endpoints are the authorization server itself: register, authorize (which
+		# redirects to Google), callback (which Google redirects to), token. All answered by
+		# vault-api; nothing here holds a model or calls Anthropic.
+		handle /.well-known/oauth-* {
+			reverse_proxy 127.0.0.1:8099
+		}
+
+		handle /oauth/* {
+			reverse_proxy 127.0.0.1:8099
+		}
+
 		handle /api/* {
 			request_body {
 				max_size 200MB

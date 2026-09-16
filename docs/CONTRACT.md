@@ -1011,6 +1011,49 @@ endpoint is a 500, never open.
 that answers and finishes, so there is nothing to notify a client about and no session state worth
 keeping restart-proof.
 
+## v2.21 Per-person identity for the MCP endpoint (new section — Tier 2)
+
+`vault-api` is an OAuth 2.1 authorization server for exactly one resource: its own MCP endpoint.
+Claude's clients implement the MCP authorization spec, so a person clicks Connect, a browser opens,
+they sign in with **Google Workspace**, and their client receives a token bound to **them**. The
+shared keys (`VAULT_API_KEY`, `VAULT_MCP_READ_KEY`) keep working and remain the right credential
+for machines; this section is for people. The model still runs in the person's own Claude client.
+Nothing here calls Anthropic.
+
+**Endpoints**, all answered by `vault-api` and proxied by Caddy at the root of the origin (the
+discovery documents must live at the root per RFC 8414 and RFC 9728):
+
+| Path | What |
+|---|---|
+| `GET /.well-known/oauth-protected-resource` (and `…/api/mcp`) | RFC 9728: names `${VAULT_PUBLIC_ORIGIN}/api/mcp` and points at this server |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata: PKCE `S256` only, public clients only, `authorization_code` + `refresh_token` |
+| `POST /oauth/register` | RFC 7591 dynamic registration. Public clients; 1–10 redirect URIs, `https` or loopback `http` |
+| `GET /oauth/authorize` | Validates client and **exact** redirect URI (a bad one is a 400 page, never a redirect), stores the PKCE challenge as a grant, redirects to Google with the grant id as `state` |
+| `GET /oauth/callback` | Exchanges Google's code, **verifies** the id_token (RS256 via Google's JWKS, issuer, audience, expiry, `email_verified`), requires `hd` and the email domain to equal `VAULT_EMAIL_DOMAIN`, upserts the person into `vault.people` as `member`, issues a single-use code (hashed, 5 min) back to the client |
+| `POST /oauth/token` | `authorization_code` + PKCE verifier → access token (1 h) + refresh token (30 d). `refresh_token` rotates; replaying a rotated one revokes its descendant chain |
+
+Tokens are opaque (`vlt_` + 43 base64url chars) and stored only as SHA-256 in `vault.oauth_tokens`
+(migration `0119`), with `email` as the principal. `server/mcp/server.mjs` accepts them alongside
+the two keys; a 401 there now carries `WWW-Authenticate: Bearer resource_metadata=…` so a client
+knows where to start. `api/_lib/auth.js` never sees an OAuth token: the REST API is unchanged.
+
+**Configuration.** All three required together, or the endpoints answer 404 and nothing changes:
+
+| var | where | notes |
+|---|---|---|
+| `VAULT_PUBLIC_ORIGIN` | server | `https://edaserver.<tailnet>.ts.net`; the issuer and base of every discovery URL. Must be the name clients actually use |
+| `VAULT_OAUTH_GOOGLE_CLIENT_ID` | server | a Google Cloud web OAuth client with `${VAULT_PUBLIC_ORIGIN}/oauth/callback` as its authorised redirect URI |
+| `VAULT_OAUTH_GOOGLE_CLIENT_SECRET` | server | Google's credential for this server; no user or client ever sees it |
+
+`VAULT_EMAIL_DOMAIN` is reused from v2.3 and is checked against Google's `hd` claim, not only the
+address suffix, for the reason given there. The identity decision is one pure function,
+`permittedEmail`, and it has its own tests.
+
+**Reachability.** The flow works wherever a browser can reach `VAULT_PUBLIC_ORIGIN`. On the tailnet
+that is Claude desktop and Claude Code on a person's own machine. The claude.ai website and phone
+apps need the public door, which is still deliberately unbuilt; when it is built, this is the
+identity layer that door was always going to need.
+
 ### Pinned dependency (amends §3)
 
 `@modelcontextprotocol/sdk` — **server-only**, like `@supabase/supabase-js` and

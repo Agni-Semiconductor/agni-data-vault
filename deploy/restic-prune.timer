@@ -1,0 +1,21 @@
+# Companion timer for restic-prune.service. THIS is the unit you enable.
+#
+# Weekly, not every eight hours. Pruning rewrites repository metadata and is the expensive half of
+# restic; running it after every backup tripled the chances of the two colliding on the repository
+# lock for no retention benefit -- `forget` applies the same policy whenever it happens to run.
+#
+# Sunday 06:00 sits clear of everything else on this box: the 04:00 restic backup (plus up to 15
+# minutes of jitter), the 03:40 restore drill, and the 02:20 database dump.
+
+[Unit]
+Description=Weekly restic retention and prune
+
+[Timer]
+OnCalendar=Sun *-*-* 06:00:00
+RandomizedDelaySec=20m
+# A missed prune should still happen; retention that silently skips a week is how a repository
+# grows past its disk.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

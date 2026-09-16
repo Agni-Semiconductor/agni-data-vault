@@ -1,0 +1,37 @@
+# Probe the local fedbench endpoint and record its current liveness state. Run by
+# fedbench-healthz.timer -- enable the TIMER, not this unit, because enabling a completed oneshot
+# would run a probe at every boot.
+#
+# The script is installed separately at /usr/local/bin/fedbench-healthz.sh. Keeping execution there
+# avoids the user_home_t SELinux label on repository and service-account paths, which systemd reports
+# as 203/EXEC even when the apparent file path looks correct.
+
+[Unit]
+Description=Probe current fedbench endpoint liveness
+OnFailure=fedbench-alert@%n.service
+
+[Service]
+# This is a short task, not a daemon; the timer supplies its five-minute retry cadence.
+Type=oneshot
+# vaultsvc, NOT a new `fedbench` account. This unit was authored with `User=fedbench`, which does
+# not exist on this host -- the accounts are vaultsvc, agnidata, fedbackup and postgres -- and
+# systemd rejects an unknown user with 217/USER at start time, which reads like a broken unit file
+# rather than a missing account. vaultsvc is the existing nologin system account that owns the very
+# API being probed, and a loopback HTTP probe needs nothing beyond it.
+User=vaultsvc
+# Keep the installed executable under /usr/local/bin, where SELinux permits systemd execution;
+# executing the checkout would fail with 203/EXEC because its label is user_home_t.
+ExecStart=/usr/local/bin/fedbench-healthz.sh
+# A failed probe must not gain capabilities or alter the host outside its state directory.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+# Its OWN subdirectory, created and chowned by systemd. /var/lib/fedbench itself is root-owned
+# 0755 and holds the alerter's root-only marker and a drill stamp owned by postgres; handing the
+# whole directory to this unit would either fail to write or disturb those. StateDirectory= creates
+# %S/fedbench/healthz owned by User= on every start, so the probe needs no installer step to exist.
+StateDirectory=fedbench/healthz
+Environment=FEDBENCH_STATE_DIR=%S/fedbench/healthz
+# curl's probe timeout is short; this still allows cleanup and state publication, but prevents a
+# wedged script from surviving long enough to overlap the next five-minute timer invocation.
+TimeoutStartSec=30s

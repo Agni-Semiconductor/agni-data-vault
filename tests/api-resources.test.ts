@@ -4,10 +4,10 @@ import * as samples from '../api/_lib/resources/samples.js';
 import * as measurements from '../api/_lib/resources/measurements.js';
 import * as stats from '../api/_lib/resources/stats.js';
 
-const state = vi.hoisted(() => ({ sb: null, defs: {}, removeObject: null, validate: null }));
+const state = vi.hoisted(() => ({ sb: null, defs: {}, deleteObject: null, validate: null }));
 
 vi.mock('../api/_lib/supabaseAdmin.js', () => ({ supabaseAdmin: () => state.sb }));
-vi.mock('../api/_lib/storage.js', () => ({ BUCKET: 'vault', removeObject: (...a) => state.removeObject(...a) }));
+vi.mock('../api/_lib/storage.js', () => ({ BUCKET: 'vault', deleteObject: (...a) => state.deleteObject(...a) }));
 vi.mock('../api/_lib/fieldDefs.js', () => ({
   validateEntity: (...a) => state.validate(...a),
   loadDefs: async (entity) => state.defs[entity] || [],
@@ -42,7 +42,7 @@ function expectOp(call, name, ...args) {
 beforeEach(() => {
   state.sb = fakeSb([]);
   state.defs = {};
-  state.removeObject = vi.fn(async () => {});
+  state.deleteObject = vi.fn(async () => {});
   state.validate = vi.fn(async () => ({ columns: {}, meta: {}, meta_status: {}, warnings: [] }));
 });
 
@@ -145,9 +145,9 @@ describe('samples resource', () => {
     state.sb = fakeSb([{ data: { id: 's1', sample_id: 'HfN_20_0421' }, error: null }, { data: [{ id: 'm1' }, { id: 'm2' }], error: null }, { data: [{ storage_path: 'p1' }, { storage_path: 'p2' }], error: null }, OK]);
     const r = await samples.remove('HfN_20_0421');
     expect(r).toEqual({ status: 200, body: { deleted: true, id: 's1' } });
-    expect(state.removeObject).toHaveBeenCalledTimes(2);
-    expect(state.removeObject).toHaveBeenNthCalledWith(1, 'p1');
-    expect(state.removeObject).toHaveBeenNthCalledWith(2, 'p2');
+    expect(state.deleteObject).toHaveBeenCalledTimes(2);
+    expect(state.deleteObject).toHaveBeenNthCalledWith(1, 'p1', 'vault');
+    expect(state.deleteObject).toHaveBeenNthCalledWith(2, 'p2', 'vault');
     const del = state.sb.calls[3];
     expect(del.table).toBe('samples');
     expectOp(del, 'delete');
@@ -155,7 +155,7 @@ describe('samples resource', () => {
   });
 
   it('remove collects warnings when storage removal fails', async () => {
-    state.removeObject = vi.fn(async () => { throw new Error('boom'); });
+    state.deleteObject = vi.fn(async () => { throw new Error('boom'); });
     state.sb = fakeSb([{ data: { id: 's1' }, error: null }, { data: [{ id: 'm1' }], error: null }, { data: [{ storage_path: 'p1' }], error: null }, OK]);
     const r = await samples.remove(UUID);
     expect(r.body.deleted).toBe(true);
@@ -235,7 +235,7 @@ describe('measurements resource', () => {
     state.sb = fakeSb([{ data: { id: 'm1' }, error: null }, { data: [{ storage_path: 'a/b.xlsx' }], error: null }, OK]);
     const r = await measurements.remove(UUID);
     expect(r).toEqual({ status: 200, body: { deleted: true, id: 'm1' } });
-    expect(state.removeObject).toHaveBeenCalledWith('a/b.xlsx');
+    expect(state.deleteObject).toHaveBeenCalledWith('a/b.xlsx', 'vault');
     expectOp(state.sb.calls[2], 'delete');
     expectOp(state.sb.calls[2], 'eq', 'id', 'm1');
   });

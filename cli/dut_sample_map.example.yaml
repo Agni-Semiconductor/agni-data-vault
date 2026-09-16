@@ -1,0 +1,10 @@
+# Bench DUT identifiers and vault sample IDs are unrelated namespaces.  Declare each
+# mapping explicitly: deriving one from the other can silently misattribute measurements.
+# The optional note records who established the mapping and the evidence, so an otherwise
+# plausible mapping does not read as a confirmed board identity without a stated basis.
+- dut_id: fake-bench-dut-01
+  sample_id: example-vault-registry-key-a17
+  note: "Example only; established by Example Person from the fictional board label."
+- dut_id: fake-bench-dut-02
+  sample_id: example-vault-registry-key-b42
+  note: "Example only; established by Example Person from a fictional lab notebook."

@@ -1,0 +1,26 @@
+# Companion timer for tailscale-cert.service. THIS is the unit you enable.
+#
+# Daily, not every-90-days. `tailscale cert` is idempotent and returns the existing certificate
+# until it is near expiry, and the renewal script reloads Caddy only when the bytes actually
+# change -- so a daily run costs one cheap call and buys a wide margin. A timer aimed at the
+# expiry date has exactly one chance to work.
+#
+# 04:40, and the offset is deliberate: clear of the 02:00 archive pull, the 03:00 monthly
+# restore verification and the Monday 04:00 prune, all of which share the same spindle.
+#
+# Persistent=true. A box that was down at 04:40 must renew when it comes back rather than wait
+# another day -- the whole cost of missing this is measured in weeks of nobody noticing.
+#
+# RandomizedDelaySec=900. Nothing waits on this, and hitting Let's Encrypt on a precise boundary
+# is a courtesy nobody benefits from.
+
+[Unit]
+Description=Daily renewal check for the tailnet TLS certificate
+
+[Timer]
+OnCalendar=*-*-* 04:40:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

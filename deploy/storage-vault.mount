@@ -1,0 +1,37 @@
+# The vault's reserved slice of /storage, as its own filesystem.
+#
+# /storage is md125, a bare RAID1 pair holding one XFS with no LVM under it. XFS cannot shrink, so
+# a real partition or logical volume for the vault would mean wiping and rebuilding the array that
+# holds everyone's EDA work. Instead the reservation is a file: vault-volume-install.sh creates
+# /storage/vault.img with fallocate, which takes its blocks from the array up front, formats it as
+# XFS, and this unit loop-mounts it here. The sims cannot write into space the file already owns,
+# and the vault cannot grow past the file. df on /storage/vault answers for the vault alone.
+#
+# Options, and why each is here:
+#   loop            mount(8) attaches a loop device for us; no fixed /dev/loopN to get wrong at boot
+#   nodiscard       online discard on the inner XFS would punch holes in the image and the reserved
+#                   blocks would quietly go back to the sims. XFS defaults to nodiscard; said out loud.
+#   X-fstrim.notrim asks fstrim -A/--listed-in (RHEL's weekly fstrim.timer) to skip this filesystem;
+#                   a trim is a hole punch by another route. A SECOND LAYER, NOT THE PROOF: in the
+#                   Rocky 9 / util-linux 2.37 harness this option could not be shown to register, and
+#                   the timer skipped the volume because of the udev rule instead.
+#                   99-vault-loop-nodiscard.rules is the load-bearing defence: it zeroes the loop
+#                   device's discard_max_bytes, so any discard -- timer, hand-run fstrim, anything --
+#                   is refused at the block layer. Proven in the harness: fstrim answered "the discard
+#                   operation is not supported" and the image stayed fully allocated.
+#
+# Undo: systemctl disable --now storage-vault.mount; rm /etc/systemd/system/storage-vault.mount;
+# the image stays at /storage/vault.img until a human deletes it.
+[Unit]
+Description=Vault reserved volume (loop-mounted image on /storage)
+Requires=storage.mount
+After=storage.mount
+
+[Mount]
+What=/storage/vault.img
+Where=/storage/vault
+Type=xfs
+Options=loop,nodiscard,X-fstrim.notrim
+
+[Install]
+WantedBy=multi-user.target

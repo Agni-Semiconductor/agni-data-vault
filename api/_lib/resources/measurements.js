@@ -3,11 +3,13 @@ import { ApiError, dbError } from '../respond.js';
 import { isUuid, parsePagination, parseSort, requireUuid } from '../validate.js';
 import { applyEntityFilters, applySort } from '../query.js';
 import { validateEntity, loadDefs } from '../fieldDefs.js';
-import { removeObject } from '../storage.js';
+import { deleteObject } from '../storage.js';
 
 const SORT_KEYS = ['measured_on', 'kind', 'instrument', 'probe_station', 'measured_by', 'temperature_c', 'device_address', 'created_at', 'updated_at'];
 const EQ_FILTERS = ['kind', 'measured_by', 'instrument', 'device_address'];
 const DEFAULT_SORTS = [['measured_on', { ascending: false, nullsFirst: false }], ['created_at', { ascending: false }]];
+const actorFor = (body, principal) => principal?.kind === 'human' ? principal.actor : body?.created_by ?? principal?.actor ?? 'api';
+async function assertAdmin(principal) { if (principal?.kind !== 'human') return; const { data, error } = await supabaseAdmin().from('people').select('role').eq('email', principal.actor).maybeSingle(); if (error) throw dbError(error); if (data?.role !== 'admin') throw new ApiError(403, 'unauthorized', 'Admin role required'); }
 
 async function resolveSample(sampleIdOrKey) {
   let q = supabaseAdmin().from('samples').select('id');
@@ -57,7 +59,7 @@ export async function listForSample(sampleIdOrKey, query = {}) {
   return { status: 200, body: { items: data || [], total: count ?? (data || []).length, ...(warnings.length ? { warnings } : {}) } };
 }
 
-export async function createForSample(sampleIdOrKey, body) {
+export async function createForSample(sampleIdOrKey, body, principal) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError(400, 'invalid_body', 'Request body must be a JSON object');
   const sample = await resolveSample(sampleIdOrKey);
   if (!body.measured_on || typeof body.measured_on !== 'string' || !body.measured_on.trim()) throw validationError('measured_on', 'required');
@@ -67,7 +69,7 @@ export async function createForSample(sampleIdOrKey, body) {
   const run_numbers = normalizeRunNumbers(columns.run_numbers ?? meta.run_numbers ?? body.run_numbers);
   delete columns.run_numbers;
   delete meta.run_numbers;
-  const payload = { ...columns, sample_id: sample.id, measured_on: columns.measured_on ?? body.measured_on, run_numbers, meta, meta_status, created_by: body.created_by ?? 'api' };
+  const payload = { ...columns, sample_id: sample.id, measured_on: columns.measured_on ?? body.measured_on, run_numbers, meta, meta_status, created_by: actorFor(body, principal) };
   const { data, error } = await supabaseAdmin().from('measurements').insert(payload).select().single();
   if (error) throw dbError(error);
   return { status: 201, body: { measurement: data, ...(warnings.length ? { warnings } : {}) } };
@@ -83,7 +85,7 @@ export async function get(id, query = {}) {
   return { status: 200, body: { measurement: m } };
 }
 
-export async function update(id, body) {
+export async function update(id, body, principal) {
   const row = await resolveMeasurement(id);
   const split = await validateEntity('measurement', body, { partial: true, current: row });
   const { columns = {}, meta = {}, meta_status = {}, warnings = [] } = split || {};
@@ -97,7 +99,7 @@ export async function update(id, body) {
   }
   if (Object.keys(meta_status).length) patch.meta_status = { ...(row.meta_status || {}), ...meta_status };
   if (expected != null && expected !== '' && String(expected) !== String(row.updated_at)) throw new ApiError(409, 'conflict', 'modified since expected_updated_at; re-read and retry');
-  if (!Object.keys(patch).length) throw new ApiError(400, 'empty_patch', 'No fields to update');
+  if (!Object.keys(patch).length) throw new ApiError(400, 'empty_patch', 'No fields to update'); if (principal) patch.updated_by = actorFor(body, principal);
   let query = supabaseAdmin().from('measurements').update(patch).eq('id', row.id);
   if (expected != null && expected !== '') query = query.eq('updated_at', expected);
   const { data, error } = await query.select().maybeSingle();
@@ -106,13 +108,14 @@ export async function update(id, body) {
   return { status: 200, body: { measurement: data, ...(warnings.length ? { warnings } : {}) } };
 }
 
-export async function remove(id) {
+export async function remove(id, principal) {
+  await assertAdmin(principal);
   const row = await resolveMeasurement(id);
   const warnings = [];
-  const { data: fs, error: e1 } = await supabaseAdmin().from('files').select('storage_path').eq('measurement_id', row.id);
+  const { data: fs, error: e1 } = await supabaseAdmin().from('files').select('storage_path, bucket').eq('measurement_id', row.id);
   if (e1) throw dbError(e1);
   for (const f of fs || []) {
-    try { await removeObject(f.storage_path); } catch { warnings.push(`failed to remove storage object "${f.storage_path}"`); }
+    try { await deleteObject(f.storage_path, f.bucket ?? 'vault'); } catch { warnings.push(`failed to remove storage object "${f.storage_path}"`); }
   }
   const { error: e2 } = await supabaseAdmin().from('measurements').delete().eq('id', row.id);
   if (e2) throw dbError(e2);

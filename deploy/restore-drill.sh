@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+# Restore the newest fedbench archive into an isolated scratch database, compare seeded rows, and
+# remove it again. A dump that has never restored is only a hypothesis.
+#
+#   bash deploy/restore-drill.sh
+#   bash deploy/restore-drill.sh --dump /srv/fedbench/backups/fedbench-2026-09-14.dump
+#   bash deploy/restore-drill.sh --check
+#
+# Undo: the scratch database is dropped on every normal or failed run by the EXIT trap. --check
+# creates no database and changes no backup, service, configuration, or live database row.
+set -uo pipefail
+
+DB=fedbench
+BACKUPS=/srv/fedbench/backups
+CHECK=0
+DUMP=""
+PSQL=/usr/pgsql-17/bin/psql
+PG_RESTORE=/usr/pgsql-17/bin/pg_restore
+CREATEDB=/usr/pgsql-17/bin/createdb
+DROPDB=/usr/pgsql-17/bin/dropdb
+fail=0
+SCRATCH=""
+
+ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
+bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; fail=$((fail + 1)); }
+step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+usage() {
+  cat <<'EOF'
+Usage: bash deploy/restore-drill.sh [--dump PATH] [--backups PATH] [--check]
+
+Restore the newest fedbench custom archive into a generated scratch database, compare seeded vault
+table counts with the live fedbench database, and drop the scratch database. --dump selects a
+specific custom archive; otherwise the newest *.dump under --backups (default:
+/srv/fedbench/backups) is used. Its same-day .sql.gz twin is checked too.
+
+--check performs only capability and archive checks. It creates no scratch database and changes no
+database, backup, service, or configuration.
+EOF
+}
+
+cleanup() {
+  local status=$?
+  if [ -n "$SCRATCH" ]; then
+    # --force disconnects only scratch clients. Without it a failed diagnostic session leaves the
+    # drill debris behind, which eventually reads as a real database someone is afraid to remove.
+    if pg "$DROPDB" --maintenance-db=postgres --force "$SCRATCH" >/dev/null 2>&1; then
+      ok "dropped scratch database $SCRATCH"
+    else
+      bad "could not drop scratch database $SCRATCH"
+      status=1
+    fi
+    SCRATCH=""
+  fi
+  return "$status"
+}
+trap cleanup EXIT
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dump)
+      [ $# -ge 2 ] || { echo "--dump needs a path" >&2; exit 2; }
+      DUMP=$2
+      shift 2
+      ;;
+    --backups)
+      [ $# -ge 2 ] || { echo "--backups needs a path" >&2; exit 2; }
+      BACKUPS=$2
+      shift 2
+      ;;
+    --check)
+      CHECK=1
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Every PostgreSQL client below needs a database superuser. Under `sudo` the OS user is root, which
+# has no Postgres role, so peer authentication fails -- and the count's `2>/dev/null` discarded that
+# message and reported "could not count live vault.field_definitions", which reads as a missing
+# table rather than as the wrong user. Switch to postgres explicitly.
+RUNAS=()
+invoking_user=$(id -un)
+if [ "$invoking_user" = postgres ]; then
+  :
+elif [ "$(id -u)" -eq 0 ]; then
+  RUNAS=(runuser -u postgres --)
+else
+  echo "restore-drill.sh needs the postgres role: run it as postgres, or as root via sudo." >&2
+  exit 2
+fi
+# Running the clients AS postgres also tests what the nightly unit needs -- that postgres can
+# traverse to the archive and execute the binaries. Asserting that as root proves nothing: root
+# reads everything, which is exactly how a directory postgres could not enter passed a root-run
+# rehearsal and then failed in 5ms at 02:00.
+pg() { "${RUNAS[@]}" "$@"; }
+
+step "1. Assertions -- select a current backup and prove the tools can use it"
+if [ -z "$DUMP" ]; then
+  shopt -s nullglob
+  dumps=("$BACKUPS"/*.dump)
+  shopt -u nullglob
+  if [ "${#dumps[@]}" -gt 0 ]; then
+    # mtime, rather than a filename sort, detects a nightly job that wrote yesterday's name today.
+    DUMP=$(printf '%s\n' "${dumps[@]}" | xargs -r -n1 stat -c '%Y %n' | sort -nr | cut -d' ' -f2- | awk 'NR == 1')
+  else
+    bad "no *.dump archive is readable under $BACKUPS"
+  fi
+fi
+
+SQL_GZ=""
+if [ -n "$DUMP" ]; then
+  case "$DUMP" in
+    *.dump) SQL_GZ=${DUMP%.dump}.sql.gz ;;
+    *) bad "custom archive must end in .dump: $DUMP" ;;
+  esac
+  if pg test -r "$DUMP"; then
+    now=$(date +%s)
+    modified=$(stat -c %Y "$DUMP" 2>/dev/null)
+    case "$modified" in
+      ''|*[!0-9]*) bad "cannot read modification time for $DUMP" ;;
+      *)
+        age=$((now - modified))
+        ok "selected $DUMP; age ${age}s"
+        ;;
+    esac
+    pg "$PG_RESTORE" --list "$DUMP" >/dev/null 2>&1 \
+      && ok "pg_restore can read the selected custom archive" \
+      || bad "pg_restore cannot read the selected custom archive"
+  else
+    bad "cannot read selected custom archive $DUMP"
+  fi
+fi
+
+if [ -n "$SQL_GZ" ] && pg test -r "$SQL_GZ"; then
+  pg gzip -t "$SQL_GZ" && ok "gzip can read same-day SQL twin $SQL_GZ" \
+    || bad "gzip cannot read same-day SQL twin $SQL_GZ"
+  # gzip -t alone accepts a schema-only dump. Require COPY or INSERT data so DDL-only output does
+  # not look like a usable backup after RLS or a dump option silently excluded all rows.
+  pg gzip -cd "$SQL_GZ" 2>/dev/null | grep -Eq '^(COPY|INSERT[[:space:]]+INTO)[[:space:]]'
+  payload_status=("${PIPESTATUS[@]}")
+  # ONLY grep's status. `grep -q` exits at its first match, which closes the pipe and kills the
+  # decompressor with SIGPIPE -- status 141, every time, on an archive that is perfectly good.
+  # The previous version also required the decompressor to exit 0, so this check FAILED BECAUSE
+  # IT SUCCEEDED QUICKLY, and a larger twin made failure MORE likely rather than less. Integrity
+  # is already established by `gzip -t` above; this line asks one question: is data present.
+  if [ "${payload_status[1]}" -eq 0 ]; then
+    ok "same-day SQL twin contains COPY or INSERT data"
+  else
+    bad "same-day SQL twin has no readable COPY or INSERT data"
+  fi
+else
+  bad "cannot read same-day SQL twin $SQL_GZ"
+fi
+
+for tool in "$PSQL" "$PG_RESTORE" "$CREATEDB" "$DROPDB"; do
+  # Running --version asserts this account can execute the intended PostgreSQL 17 client; testing
+  # only that a pathname exists lets the Siemens Calibre client win later and mislabels it a restore failure.
+  pg "$tool" --version >/dev/null 2>&1 && ok "can execute $tool" || bad "cannot execute $tool"
+done
+
+step "2. Assertions -- enumerate every non-empty table in the live database"
+# ENUMERATED, not listed. This check used to name four vault vocabulary tables. The moment real
+# data lands, a hardcoded list still passes while samples, measurements, files and every bench
+# table come back EMPTY -- a green drill certifying nothing, which is worse than no drill.
+#
+# Asking the database what it contains means the drill covers new tables the day they appear,
+# including the whole `public` bench schema when the testbench data arrives, with no edit here.
+COUNT_SQL="select n.nspname || '|' || c.relname || '|' ||
+       (xpath('/row/c/text()', query_to_xml(
+          format('select count(*) as c from %I.%I', n.nspname, c.relname), false, true, '')))[1]::text
+from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where c.relkind = 'r' and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+order by 1"
+
+live_raw=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$DB" -c "$COUNT_SQL" 2>&1)
+declare -A live_counts=()
+live_tables=0
+live_rows=0
+if printf '%s' "$live_raw" | grep -q '^[A-Za-z_][A-Za-z0-9_]*|'; then
+  while IFS='|' read -r schema table count; do
+    [ -n "$table" ] || continue
+    case "$count" in ''|*[!0-9]*) continue ;; esac
+    # Only non-empty tables are comparable: an empty table restores as empty and proves nothing
+    # either way, and several in this schema are legitimately empty today.
+    [ "$count" -gt 0 ] || continue
+    live_counts["$schema.$table"]=$count
+    live_tables=$((live_tables + 1))
+    live_rows=$((live_rows + count))
+  done <<EOF
+$(printf '%s' "$live_raw")
+EOF
+else
+  bad "could not enumerate live tables: $(printf '%s' "$live_raw" | tail -1)"
+fi
+
+# A floor, because "compare every non-empty table" is vacuously satisfied by a database with none.
+# That is exactly what the RLS-enabled-no-policies design produces for a role without BYPASSRLS,
+# and a drill that silently compared zero tables would report PASSED.
+MIN_TABLES=${FEDBENCH_DRILL_MIN_TABLES:-4}
+if [ "$live_tables" -lt "$MIN_TABLES" ]; then
+  bad "only $live_tables non-empty table(s) in $DB (expected at least $MIN_TABLES) -- a source this empty cannot prove a restore"
+else
+  ok "live database has $live_tables non-empty table(s), $live_rows row(s) total"
+fi
+
+if [ "$CHECK" -eq 1 ]; then
+  if [ "$fail" -gt 0 ]; then
+    printf '\n\033[31mVERDICT: restore drill CHECK FAILED (%d failure(s)); nothing was changed.\033[0m\n' "$fail"
+    exit 1
+  fi
+  printf '\n\033[32mVERDICT: restore drill CHECK PASSED; nothing was changed.\033[0m\n'
+  exit 0
+fi
+
+step "3. Create an isolated scratch database"
+# This name is constructed here, never accepted from an argument. The fixed restore-drill prefix
+# makes it visibly disposable, and the equality check prevents a future edit from targeting fedbench.
+SCRATCH="fedbench_restore_drill_$(date +%s)_$$_${RANDOM}"
+# `case`, NOT `[ "$x" != prefix_* ]`. `[` compares STRINGS: the `*` is a literal character, so that
+# test is true for every possible name and the guard fired on every run -- the drill would refuse to
+# create a scratch database, restore nothing, and report a refusal that reads as caution rather than
+# as a drill that never ran. (Unquoted, the `*` is also a pathname glob against the working
+# directory, so the comparison could change meaning depending on where the script was invoked.)
+# `case` is the construct that actually pattern-matches in POSIX shell.
+scratch_ok=0
+case "$SCRATCH" in
+  "$DB") : ;;                          # identical to the live database: refuse
+  fedbench_restore_drill_*) scratch_ok=1 ;;
+esac
+if [ "$scratch_ok" -ne 1 ]; then
+  bad "refusing to create scratch database name $SCRATCH because it could be $DB"
+  SCRATCH=""
+elif pg "$CREATEDB" --maintenance-db=postgres "$SCRATCH" >/dev/null 2>&1; then
+  ok "created isolated scratch database $SCRATCH"
+else
+  bad "could not create scratch database $SCRATCH"
+  SCRATCH=""
+fi
+
+step "4. Restore and compare seeded table counts"
+if [ -n "$SCRATCH" ] && [ -r "$DUMP" ]; then
+  # KEEP --exit-on-error: without it pg_restore prints "WARNING: errors ignored on restore: N" and
+  # exits 0, so a scheduled exit-status check certifies a half-restored database forever.
+  if pg "$PG_RESTORE" --exit-on-error --no-owner --no-privileges -d "$SCRATCH" "$DUMP" >/dev/null 2>&1; then
+    ok "pg_restore completed with --exit-on-error"
+  else
+    bad "pg_restore failed; scratch database was not fully restored"
+  fi
+  # Read the restored side the same way, then compare EVERY table the live database has rows in.
+  # A table present in live and missing from the restore never appears here, so it is reported by
+  # the absence check below rather than passing unnoticed.
+  scratch_raw=$(pg "$PSQL" -X -At -v ON_ERROR_STOP=1 -d "$SCRATCH" -c "$COUNT_SQL" 2>&1)
+  declare -A scratch_counts=()
+  while IFS='|' read -r schema table count; do
+    [ -n "$table" ] || continue
+    case "$count" in ''|*[!0-9]*) continue ;; esac
+    scratch_counts["$schema.$table"]=$count
+  done <<EOF
+$(printf '%s' "$scratch_raw")
+EOF
+
+  matched=0
+  for key in "${!live_counts[@]}"; do
+    want=${live_counts[$key]}
+    got=${scratch_counts[$key]:-missing}
+    case "$got" in
+      missing) bad "restored $key is MISSING; live has $want row(s)" ;;
+      0)       bad "restored $key has zero rows; schema without rows is not a backup" ;;
+      "$want") matched=$((matched + 1)) ;;
+      *)       bad "restored $key has $got row(s), live has $want" ;;
+    esac
+  done
+  if [ "$matched" -eq "$live_tables" ] && [ "$live_tables" -gt 0 ]; then
+    ok "all $matched non-empty table(s) match live, $live_rows row(s) total"
+  elif [ "$matched" -gt 0 ]; then
+    ok "$matched of $live_tables table(s) match live"
+  fi
+else
+  bad "restore was not attempted because no scratch database or readable archive is available"
+fi
+
+# Drop before the verdict so a cleanup failure cannot be reported as a passing drill. The EXIT trap
+# remains armed for signals and unexpected exits between create and this explicit cleanup.
+cleanup
+if [ "$fail" -gt 0 ]; then
+  printf '\n\033[31mVERDICT: restore drill FAILED (%d failure(s)); scratch database removed.\033[0m\n' "$fail"
+  exit 1
+fi
+# Record the proof. fedbench-deadman.sh alarms when this stamp goes stale, which is how a drill
+# that quietly STOPPED RUNNING gets noticed -- a timer that never fires produces no failure, no
+# journal line, and nothing for OnFailure= to react to.
+#
+# A failure to write the stamp must not fail a drill that passed: the restore is the result, the
+# stamp is bookkeeping. It is reported, not fatal. The installer pre-creates the file owned by
+# postgres so this works without granting write on the directory itself.
+STAMP=${FEDBENCH_STATE_DIR:-/var/lib/fedbench}/last-drill-success
+# The braces matter: `cmd >file 2>/dev/null` redirects the COMMAND's stderr, but bash reports a
+# failed redirection itself before the command ever runs, so an unwritable path printed a raw
+# "No such file or directory" above the warn line. Grouping puts the redirection inside.
+if { date +%s >"$STAMP"; } 2>/dev/null; then
+  ok "recorded the successful drill in $STAMP"
+else
+  printf '  \033[33mwarn\033[0m  could not write %s -- the liveness check will call this stale\n' "$STAMP"
+fi
+printf '\n\033[32mVERDICT: restore drill PASSED; scratch database removed.\033[0m\n'

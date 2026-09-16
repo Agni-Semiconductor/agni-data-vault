@@ -1,0 +1,22 @@
+# Companion timer for fedbench-offhost.service. THIS is the unit you enable; the service has no
+# [Install] section so enabling it cannot cause a completed copy to run on every boot.
+#
+# The local dump starts at 02:20 and may be delayed by up to 15 minutes. 03:10 leaves that window
+# plus time for the dump to finish before the Sunday restore drill at 03:40, so this copy reads a
+# completed dump instead of racing the job that is still writing it.
+
+[Unit]
+Description=Nightly off-host fedbench backup copy
+OnFailure=fedbench-alert@%n.service
+
+[Timer]
+OnCalendar=*-*-* 03:10:00
+# A small spread prevents several backup-related timers from contending on the same disk while
+# keeping the copy comfortably before the 03:40 restore drill.
+RandomizedDelaySec=300
+# If the host was down at 03:10, run the missed copy at the next boot rather than silently losing
+# that night's off-host recovery point.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

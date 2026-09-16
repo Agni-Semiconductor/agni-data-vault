@@ -1,0 +1,19 @@
+# Companion timer for fedbench-backup.service. THIS is the unit you enable; the service has no
+# [Install] section so enabling it cannot cause a completed backup to run on every boot.
+#
+# Persistent=true means an overnight outage triggers the missed backup at next boot rather than
+# silently losing a night's recovery point.
+#
+# 02:20 is separate from tailscale-cert.timer at 04:40. The delay avoids every timer starting on
+# the same boundary, which otherwise makes shared-disk contention look like a database failure.
+
+[Unit]
+Description=Nightly local fedbench database backup
+
+[Timer]
+OnCalendar=*-*-* 02:20:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

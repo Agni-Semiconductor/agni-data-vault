@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 
@@ -22,7 +23,8 @@ class ApiError(Exception):
     def __init__(self, code, message): self.code, self.message = code, message
 
 class VaultClient:
-    def __init__(self, base_url, api_key, session=None):
+    def __init__(self, base_url=None, api_key=None, session=None):
+        base_url = base_url or os.getenv("VAULT_API_URL", ""); api_key = api_key or os.getenv("VAULT_API_KEY", "")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.session = session or requests.Session()
@@ -51,12 +53,15 @@ class VaultClient:
         with open(path, "rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""): digest.update(chunk)
         info = self.post("/api/files/upload-url", {"measurement_id": measurement_id, "filename": os.path.basename(path), "size_bytes": size, "sha256": digest.hexdigest()})
-        headers = {"Content-Type": "application/octet-stream"}
-        if info.get("token"): headers.update({"x-upsert": "false", "Authorization": "Bearer " + info["token"]})
+        headers = {"Authorization": "Bearer " + self.api_key, "Content-Type": "application/octet-stream"}
         with open(path, "rb") as handle:
-            response = self.session.put(info["signed_url"], data=handle, headers=headers, timeout=120)
-        if not response.ok: raise ApiError("upload_failed", response.text or response.reason)
-        return self.post("/api/files/" + info["file_id"] + "/register", {"size_bytes": size, "sha256": digest.hexdigest()})
+            response = self.session.put(urljoin(self.base_url + "/", info["upload_url"].lstrip("/")), data=handle, headers=headers, timeout=120)
+        try: data = response.json()
+        except ValueError: data = {}
+        if not response.ok:
+            error = data.get("error", {})
+            raise ApiError(error.get("code", "upload_failed"), error.get("message", response.text or response.reason))
+        return data
 
 def date_value(value):
     try: return dt.date.fromisoformat(value).isoformat()
@@ -122,7 +127,7 @@ def main(argv=None):
     parser = build_parser()
     try: args, unknown = parser.parse_known_args(rest)
     except SystemExit as exc: return exc.code
-    client = VaultClient(globals_.api_url or os.getenv("VAULT_API_URL", ""), globals_.api_key or os.getenv("VAULT_API_KEY", ""))
+    client = VaultClient(globals_.api_url, globals_.api_key)
     try:
         if args.command == "schema": result = client.schema(); print(json.dumps(result, indent=2)); return 0
         if args.command == "fields":

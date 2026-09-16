@@ -1,0 +1,35 @@
+# Apply restic's retention policy and reclaim space, weekly, on its own timer.
+#
+# Until 2026-09-16 the prune was an ExecStartPost on restic-backup.service, so a prune failure marked
+# the BACKUP failed. That is the reason for the split: two jobs with two failure modes and two
+# urgencies do not belong behind one exit status. Whether the old shape had actually been failing
+# that way is UNVERIFIED; the earlier "45 of 45 nights" claim came from a document, not this box's
+# journal.
+#
+# INSTALLED on edaserver 2026-09-16 by vault-volume-install.sh step 7, which wrote the ExecStart line
+# from the live unit's own ExecStartPost value rather than from this file. The captured live policy
+# was --keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune, which is exactly
+# the line below, so the file and the box now agree. If the policy ever changes, change it on the
+# box AND here; the installer only copies live -> installed, never repo -> live, for this line.
+#
+# Restic is managed by Owen; installed under his authorization of 2026-09-16.
+# Undo: systemctl disable --now restic-prune.timer and put the ExecStartPost back on the backup.
+
+[Unit]
+Description=Restic retention and prune on the Synology NAS
+Requires=mnt-nasbackup.mount
+After=mnt-nasbackup.mount
+# Never run while a backup is in flight: both take the repository lock, and contention is what
+# created the stale lock this split exists to stop happening again.
+Conflicts=restic-backup.service
+After=restic-backup.service
+OnFailure=fedbench-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=RESTIC_CACHE_DIR=/var/cache/restic
+EnvironmentFile=/etc/restic/backup.env
+# Verified against the live unit on 2026-09-16, flag for flag.
+ExecStart=/usr/bin/restic forget --keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+Nice=10
+IOSchedulingClass=idle

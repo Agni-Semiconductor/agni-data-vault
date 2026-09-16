@@ -1,11 +1,15 @@
 import type uPlot from 'uplot'
 import type { ParsedFile } from './parseFile'
 
-export type PlotKind = 'dciv' | 'aciv' | 'pund' | 'pulse' | 'cv' | 'board_csv' | 'other'
+export type PlotKind = 'dciv' | 'aciv' | 'pund' | 'pulse' | 'cv' | 'res2t' | 'board_csv' | 'other'
 export type PlotProfile = { x: string[]; y: string[]; y2?: string[]; abs_y?: boolean; log_y?: boolean }
 export const PROFILES: Record<PlotKind, PlotProfile> = {
-  dciv: { x: ['AV', 'BV'], y: ['AI', 'BI'], abs_y: true, log_y: true }, aciv: { x: ['Vforce'], y: ['Imeas'] }, pund: { x: ['Time', 't'], y: ['V'], y2: ['I', 'Psw', 'Qsw'] }, pulse: { x: ['t', 'Time'], y: ['V'], y2: ['I'] }, cv: { x: ['V'], y: ['C'] }, board_csv: { x: ['v_applied'], y: ['i_a', 'current_mA'], y2: ['v_meas'], abs_y: true, log_y: true }, other: { x: [], y: [] },
+  dciv: { x: ['AV', 'BV'], y: ['AI', 'BI'], abs_y: true, log_y: true }, aciv: { x: ['Vforce'], y: ['Imeas'] }, pund: { x: ['Time', 't'], y: ['V'], y2: ['I', 'Psw', 'Qsw'] }, pulse: { x: ['t', 'Time'], y: ['V'], y2: ['I'] }, cv: { x: ['V'], y: ['C'] }, res2t: { x: ['V'], y: ['I'] }, board_csv: { x: ['v_applied'], y: ['i_a', 'current_mA'], y2: ['v_meas'], abs_y: true, log_y: true }, other: { x: [], y: [] },
 }
+// `res2t` (2-terminal resistance) has a profile because vault.measurement_kinds declares the
+// kind and a measurement carries its kind explicitly -- so the database can ask for it. It has
+// no entry in detectKind below on purpose: detection reads a FILENAME, and this corpus has no
+// established res2t token to match. Guessing one would reclassify existing files.
 const has = (headers: string[], value: string) => headers.some((header) => header.toLowerCase() === value.toLowerCase())
 export function detectKind(headers: string[], filename: string): PlotKind {
   const name = filename.toLowerCase()

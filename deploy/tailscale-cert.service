@@ -1,0 +1,39 @@
+# Renew the tailnet door's TLS certificate. Run by tailscale-cert.timer -- enable the TIMER,
+# not this unit.
+#
+# `tailscale cert` issues a real Let's Encrypt certificate for edaserver.<tailnet>.ts.net over
+# DNS-01, valid ~90 days. deploy/Caddyfile points at the files this writes.
+#
+# Two things about the tailnet door that this does NOT solve, recorded here because both look
+# like a certificate problem when they bite:
+#   * The SHORT name `https://edaserver` can never have a valid certificate. MagicDNS resolves
+#     the name; nothing issues a certificate for it. Use the full .ts.net name everywhere.
+#   * `.ts.net` names are publicly resolvable and appear in Certificate Transparency logs. Not
+#     routable from outside the tailnet, but the hostname is public knowledge -- so the door
+#     behind it authenticates every request rather than relying on the name being obscure.
+#
+# RHEL 9 install warning: use `cp`, never `mv`, to install this file. A moved unit keeps its
+# source SELinux context and systemd then refuses to load it.
+#
+# Root, because `tailscale cert` needs the tailscaled socket. That is also why this is a
+# separate oneshot rather than something folded into the Caddy unit, which should not run as
+# root.
+
+[Unit]
+Description=Renew the tailnet TLS certificate for the vault endpoint
+After=network-online.target tailscaled.service
+Wants=network-online.target
+Requires=tailscaled.service
+# A failed renewal is silent for weeks and then total -- the bench watcher reads a TLS error as
+# unreachable and backs off quietly. Point this at whatever actually reaches a human.
+# OnFailure=status-email@%n.service
+
+[Service]
+Type=oneshot
+# TAILSCALE_CERT_DOMAIN, TAILSCALE_CERT_PATH and TAILSCALE_KEY_PATH must match deploy/Caddyfile
+# exactly. They are in an EnvironmentFile rather than inline so there is one place to change the
+# path, and so a mismatch is a missing-variable error at start rather than a certificate written
+# somewhere Caddy is not looking.
+EnvironmentFile=/etc/vault/tailscale-cert.env
+ExecStart=/srv/vault/app/deploy/tailscale-cert-renew.sh
+TimeoutStartSec=5m

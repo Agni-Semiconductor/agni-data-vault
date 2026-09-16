@@ -1,0 +1,19 @@
+# Companion timer for restic-backup.service. THIS is the unit you enable.
+#
+# UNVERIFIED against the box. This claimed to be "adopted unchanged" from edaserver, but the service
+# it accompanies turned out (2026-09-16) not to match the live unit at all, so this schedule is not
+# trusted until `systemctl cat restic-backup.timer` has been compared with it. Restic is managed by
+# Owen; nothing in this repo installs this file.
+#
+# Three times a day is a sensible cadence for /storage, which is live working data.
+
+[Unit]
+Description=Restic backup every 8 hours (04:00, 12:00, 20:00)
+
+[Timer]
+OnCalendar=*-*-* 04/8:00:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -13,6 +13,7 @@ const COLUMN_WHITELIST = {
   measurement: ['measured_on', 'kind', 'instrument', 'probe_station', 'measured_by', 'temperature_c', 'device_address', 'run_numbers', 'pad_shape', 'pad_dim_um', 'pad_area_override', 'notes'],
   file: [],
 };
+async function assertAdmin(principal) { if (principal?.kind !== 'human') return; const { data, error } = await supabaseAdmin().from('people').select('role').eq('email', principal.actor).maybeSingle(); if (error) throw dbError(error); if (data?.role !== 'admin') throw new ApiError(403, 'unauthorized', 'Admin role required'); }
 
 function defErrors(p, { isNew }) {
   const errors = [];
@@ -38,6 +39,13 @@ async function fetchOne(id) {
   return data;
 }
 
+// The flat views (samples_flat / measurements_flat) are generated FROM these rows, so any
+// write here leaves them stale until they are rebuilt. Best-effort on purpose: a field
+// definition that saved correctly must not be reported as failed because a read convenience
+// could not be regenerated. The failure is logged and `vault.rebuild_flat_views()` can be
+// called by hand. Rebuilding also NOTIFYs PostgREST, without which the new column stays
+// invisible over REST until a restart.
+async function rebuildFlatViews() { try { const { error } = await db().rpc('rebuild_flat_views'); if (error) console.warn('flat view rebuild failed:', error.message); } catch (err) { console.warn('flat view rebuild failed:', err?.message || err); } }
 export async function list(query = {}) {
   if (query.entity != null && query.entity !== '' && !ENTITIES.includes(query.entity)) throw new ApiError(400, 'invalid_input', 'entity must be one of sample, measurement, file');
   let q = supabaseAdmin().from('field_definitions').select('*', { count: 'exact' });
@@ -48,7 +56,8 @@ export async function list(query = {}) {
   return { status: 200, body: { items: data || [], total: count ?? (data || []).length } };
 }
 
-export async function create(body) {
+export async function create(body, principal) {
+  await assertAdmin(principal);
   const warnings = [];
   const p = pickAllowed(body, WRITABLE, warnings);
   const errors = defErrors(p, { isNew: true });
@@ -59,7 +68,7 @@ export async function create(body) {
     if (error.code === '23505') throw new ApiError(409, 'conflict', 'field already exists for entity');
     throw dbError(error);
   }
-  bustCache();
+  bustCache(); await rebuildFlatViews();
   return { status: 201, body: { field_definition: data, ...(warnings.length ? { warnings } : {}) } };
 }
 
@@ -67,7 +76,8 @@ export async function get(id) {
   return { status: 200, body: { field_definition: await fetchOne(id) } };
 }
 
-export async function update(id, body) {
+export async function update(id, body, principal) {
+  await assertAdmin(principal);
   const row = await fetchOne(id);
   const warnings = [];
   const p = pickAllowed(body, WRITABLE, warnings);
@@ -78,14 +88,15 @@ export async function update(id, body) {
   if (p.options_list_key) await assertListExists(p.options_list_key);
   const { data, error } = await supabaseAdmin().from('field_definitions').update(p).eq('id', row.id).select().single();
   if (error) throw dbError(error);
-  bustCache();
+  bustCache(); await rebuildFlatViews();
   return { status: 200, body: { field_definition: data, ...(warnings.length ? { warnings } : {}) } };
 }
 
-export async function remove(id) {
+export async function remove(id, principal) {
+  await assertAdmin(principal);
   const row = await fetchOne(id);
   const { data, error } = await supabaseAdmin().from('field_definitions').update({ active: false }).eq('id', row.id).select().single();
   if (error) throw dbError(error);
-  bustCache();
+  bustCache(); await rebuildFlatViews();
   return { status: 200, body: { deleted: true, id: data.id, soft: true } };
 }

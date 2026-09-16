@@ -7,7 +7,7 @@ async function countRows(sb, table) {
   return count ?? 0;
 }
 
-export async function get(query = {}) {
+export async function get(query = {}, principal) {
   const sb = supabaseAdmin();
   const [samples, measurements, files] = await Promise.all([countRows(sb, 'samples'), countRows(sb, 'measurements'), countRows(sb, 'files')]);
   const { data: sizes, error: e1 } = await sb.from('files').select('size_bytes');

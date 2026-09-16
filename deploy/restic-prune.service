@@ -6,11 +6,13 @@
 # actually been failing that way is UNVERIFIED; the earlier "45 of 45 nights" claim here came from a
 # document, not this box's journal.
 #
-# THE RETENTION FLAGS BELOW ARE A GUESS PAST --keep-daily 14. The live line was cut short by the
-# pager at "--keep-weekl>". Copy the real tail from `cat /etc/systemd/system/restic-backup.service`
-# before this unit is ever enabled; a prune with the wrong policy deletes snapshots.
+# THE RETENTION FLAGS BELOW ARE NOT WHAT GETS INSTALLED. vault-volume-install.sh step 7 replaces the
+# ExecStart line with the live unit's own ExecStartPost value, verbatim, at install time -- the
+# policy on the box is the policy, and a prune with the wrong policy deletes snapshots. The line
+# here is the fallback only if the live unit has no ExecStartPost, and past --keep-daily 14 it was
+# never verified against this box (the pager cut the live line at "--keep-weekl>").
 #
-# Restic is managed by Owen; this file is applied only by his hand.
+# Restic is managed by Owen; installed under his authorization of 2026-09-16.
 # Undo: systemctl disable --now restic-prune.timer and put the ExecStartPost back on the backup.
 
 [Unit]

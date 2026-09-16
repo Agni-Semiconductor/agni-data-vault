@@ -29,10 +29,14 @@ set -uo pipefail
 # afterwards; its assertions accept a loop mount. It does not touch the PostgreSQL data directory,
 # which stays on the root mirror -- see relocate-fedbench-data.sh for why.
 #
-# IT DOES NOT TOUCH RESTIC. restic-backup.service is Owen's and is managed separately (his call,
-# 2026-09-16). This script only READS the live unit and reports whether it excludes the image;
-# it never installs, edits or reloads it. Without the exclude, restic reads the whole 512 GiB image
-# every night and stores a torn copy of it -- wasteful, not dangerous -- so that is a warning here.
+# RESTIC. restic-backup.service is Owen's. Step 7 replaces it ONLY because he authorized exactly
+# that on 2026-09-16 ("you may put the updated restic file in the repo and have it instantiated in
+# the process im about to run, confirmed good by me"). --no-restic skips the step entirely. To keep
+# every fact about his setup his rather than guessed, step 7 does not trust the repo for anything
+# the live unit can supply: the retention policy for the split-out prune is copied verbatim from
+# the live ExecStartPost line, the snapshot tag is copied from the live ExecStart, and the OnFailure
+# hook is dropped from the installed copies if fedbench-alert@.service is not on this host. The live
+# unit is saved with a timestamp first, and the live timer is not touched.
 #
 # Undo: systemctl disable --now storage-vault.mount; rm /etc/systemd/system/storage-vault.mount
 # /etc/udev/rules.d/99-vault-loop-nodiscard.rules; systemctl daemon-reload; udevadm control --reload.
@@ -50,6 +54,10 @@ MOUNT=/storage/vault
 MOUNT_UNIT=storage-vault.mount
 UDEV_RULE=99-vault-loop-nodiscard.rules
 RESTIC_UNIT=restic-backup.service
+PRUNE_UNIT=restic-prune.service
+PRUNE_TIMER=restic-prune.timer
+ALERT_TEMPLATE=fedbench-alert@.service
+RESTIC=1
 # Overridable only so the container harness (no md module, hence no /proc/mdstat) can exercise
 # every step against a fake. On the box, leave it alone.
 MDSTAT=${MDSTAT:-/proc/mdstat}
@@ -66,7 +74,8 @@ iec()  { numfmt --to=iec "$1" 2>/dev/null || echo "$1 bytes"; }
 
 usage() {
   sed -n '3,8p' "$0"
-  printf '\nUsage: sudo bash %s [--size 512G] [--check]\n' "$0"
+  printf '\nUsage: sudo bash %s [--size 512G] [--check] [--no-restic]\n' "$0"
+  printf '--no-restic leaves restic-backup.service exactly as it is and skips the prune split (step 7).\n'
   printf 'The image path (%s), mount point (%s) and unit names are fixed: the mount unit and the udev\n' "$IMAGE" "$MOUNT"
   printf 'rule in the checkout both name them, and one flag cannot change three files.\n'
 }
@@ -77,6 +86,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--size needs a value such as 512G" >&2; exit 2; }
       SIZE=$2; shift 2 ;;
     --check) CHECK=1; shift ;;
+    --no-restic) RESTIC=0; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -149,9 +159,19 @@ command -v fstrim >/dev/null 2>&1 && ok "fstrim is available (its dry run is the
   || warn "fstrim is missing; the trim-protection proof in step 10 will be skipped"
 
 step "4. Assertions -- the checkout carries what gets installed"
-for f in "$MOUNT_UNIT" "$UDEV_RULE"; do
+needed="$MOUNT_UNIT $UDEV_RULE"
+[ "$RESTIC" -eq 1 ] && needed="$needed $RESTIC_UNIT $PRUNE_UNIT $PRUNE_TIMER"
+for f in $needed; do
   [ -f "$UNITSRC/$f" ] && ok "$UNITSRC/$f present" || bad "$UNITSRC/$f missing -- is UNITSRC the vault checkout?"
 done
+if [ "$RESTIC" -eq 1 ] && [ -f "$UNITSRC/$RESTIC_UNIT" ]; then
+  # The proposed unit must carry the exclude and the dump path, and must NOT carry a prune of its
+  # own, or the split in step 7 would leave two prunes racing for the repository lock.
+  grep -q -- "--exclude=$IMAGE" "$UNITSRC/$RESTIC_UNIT" && ok "checkout $RESTIC_UNIT excludes $IMAGE" || bad "checkout $RESTIC_UNIT lacks --exclude=$IMAGE"
+  grep -q -- "/srv/fedbench/backups" "$UNITSRC/$RESTIC_UNIT" && ok "checkout $RESTIC_UNIT backs up the dump pair" || bad "checkout $RESTIC_UNIT does not name /srv/fedbench/backups"
+  grep -q "^ExecStartPost=" "$UNITSRC/$RESTIC_UNIT" && bad "checkout $RESTIC_UNIT still has an ExecStartPost; the prune belongs in $PRUNE_UNIT" || ok "checkout $RESTIC_UNIT has no ExecStartPost"
+  grep -q "^ExecStart=/usr/bin/restic forget .*--prune" "$UNITSRC/$PRUNE_UNIT" 2>/dev/null && ok "checkout $PRUNE_UNIT is a restic forget --prune" || bad "checkout $PRUNE_UNIT is not a restic forget --prune"
+fi
 if [ -f "$UNITSRC/$MOUNT_UNIT" ]; then
   # The unit and this script must agree on paths, or the mount lands somewhere step 10 never looks.
   grep -q "^What=$IMAGE\$" "$UNITSRC/$MOUNT_UNIT" && ok "$MOUNT_UNIT mounts $IMAGE" || bad "$MOUNT_UNIT does not name What=$IMAGE"
@@ -201,15 +221,106 @@ fi
 [ "$fail" -eq 0 ] || { printf '\n\033[31mRefusing to proceed with %d failed assertion(s).\033[0m\n' "$fail"; exit 1; }
 
 # ---------------------------------------------------------------------------------------------------
-step "7. Restic -- READ ONLY, reported and left alone"
-# restic-backup.service is managed separately by Owen. This step never installs, edits, backs up or
-# reloads it. It only says whether the live unit will skip the image, so the consequence is known.
-if ! systemctl cat "$RESTIC_UNIT" >/dev/null 2>&1; then
-  warn "no live $RESTIC_UNIT on this host; nothing to report"
-elif systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE"; then
-  ok "live $RESTIC_UNIT excludes $IMAGE"
+if [ "$RESTIC" -eq 0 ]; then
+  step "7. Restic -- skipped (--no-restic)"
+  systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE" && ok "live $RESTIC_UNIT excludes $IMAGE" \
+    || warn "live $RESTIC_UNIT does not exclude $IMAGE; each nightly run will read the whole image"
+elif systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE" \
+     && ! systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q "^ExecStartPost="; then
+  step "7. Restic -- already in the proposed shape"
+  ok "live $RESTIC_UNIT excludes $IMAGE and carries no ExecStartPost; leaving it alone"
 else
-  warn "live $RESTIC_UNIT does not exclude $IMAGE -- each nightly run will read the whole image; add --exclude=$IMAGE to it when you manage restic (not done here)"
+  step "7. Restic -- replace the live unit, with the policy and tag copied FROM it (authorized by Owen, 2026-09-16)"
+  live="$UNITDIR/$RESTIC_UNIT"
+  rfail=$fail
+  # Preconditions: everything step 7 relies on must already be true of the box, or nothing is touched.
+  [ -f "$live" ] && ok "live unit is a file at $live" || bad "$live is not a plain file (a drop-in or generated unit is not what this step was written against)"
+  [ -f /etc/restic/backup.env ] && ok "/etc/restic/backup.env exists" || bad "/etc/restic/backup.env missing; the proposed unit would fail to start"
+  systemctl cat mnt-nasbackup.mount >/dev/null 2>&1 && ok "mnt-nasbackup.mount is known to systemd" || bad "mnt-nasbackup.mount is not known to systemd; the units Require it"
+  if systemctl is-active --quiet "$RESTIC_UNIT" 2>/dev/null; then
+    bad "$RESTIC_UNIT is running right now; re-run after it finishes rather than swap its file mid-backup"
+  else
+    ok "$RESTIC_UNIT is not running"
+  fi
+  # The two facts copied from the live unit rather than trusted from the repo.
+  live_forget=$(grep -m1 "^ExecStartPost=" "$live" 2>/dev/null | sed 's/^ExecStartPost=//')
+  live_tag=$(grep -m1 "^ExecStart=" "$live" 2>/dev/null | grep -o -- '--tag [^ ]*' | awk '{print $2}')
+  if [ -n "$live_forget" ]; then
+    case "$live_forget" in
+      *"restic forget "*"--prune"*) ok "live prune policy captured: $live_forget" ;;
+      *) bad "live ExecStartPost is not a 'restic forget ... --prune' line; refusing to guess what it is: $live_forget" ;;
+    esac
+  else
+    warn "live unit has no ExecStartPost; $PRUNE_UNIT will use the policy in the checkout (flags past --keep-daily 14 were never verified against this box)"
+  fi
+  [ -n "$live_tag" ] && ok "live snapshot tag captured: $live_tag" || warn "no --tag on the live ExecStart; the installed unit will tag snapshots 'scheduled'"
+  if [ -f "$UNITDIR/$ALERT_TEMPLATE" ]; then
+    ok "$ALERT_TEMPLATE is installed; OnFailure stays"
+    strip_alert=0
+  else
+    warn "$ALERT_TEMPLATE is not installed; OnFailure will be removed from the installed copies so systemd has nothing to fail to enqueue"
+    strip_alert=1
+  fi
+  # Nothing in /proc/mounts or the repository has been touched up to here.
+  if [ "$fail" -gt "$rfail" ]; then
+    printf '\n\033[31mRestic preconditions failed; the live unit was not touched. Fix the above or re-run with --no-restic.\033[0m\n'
+    exit 1
+  fi
+
+  stamp=$(date +%Y%m%dT%H%M%S)
+  cp -a "$live" "$live.bak.$stamp" && ok "kept the live unit at $live.bak.$stamp" || bad "could not back up $live"
+  [ "$fail" -eq "$rfail" ] || exit 1
+
+  # Stage the installed copies in a temp dir, edit them there, and only then move them into place.
+  stage=$(mktemp -d)
+  cp "$UNITSRC/$RESTIC_UNIT" "$UNITSRC/$PRUNE_UNIT" "$UNITSRC/$PRUNE_TIMER" "$stage/"
+  if [ -n "$live_tag" ] && [ "$live_tag" != "scheduled" ]; then
+    sed -i "s/--tag scheduled/--tag $live_tag/" "$stage/$RESTIC_UNIT" && ok "installed backup unit tags snapshots '$live_tag', as live does"
+  fi
+  if [ -n "$live_forget" ]; then
+    # Replace the whole ExecStart line of the prune unit with the live forget command. Using awk with
+    # the value passed as a variable, so nothing in the live line is interpreted as a pattern.
+    awk -v v="$live_forget" '/^ExecStart=/ { print "ExecStart=" v; next } { print }' "$stage/$PRUNE_UNIT" > "$stage/$PRUNE_UNIT.new" \
+      && mv "$stage/$PRUNE_UNIT.new" "$stage/$PRUNE_UNIT" && ok "prune unit carries the live policy verbatim" || bad "could not write the live policy into $PRUNE_UNIT"
+  fi
+  if [ "$strip_alert" -eq 1 ]; then
+    sed -i '/^OnFailure=/d' "$stage/$RESTIC_UNIT" "$stage/$PRUNE_UNIT" && ok "OnFailure removed from both installed copies"
+  fi
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    if systemd-analyze verify "$stage/$RESTIC_UNIT" "$stage/$PRUNE_UNIT" "$stage/$PRUNE_TIMER" >/tmp/vault-restic-verify.$$ 2>&1; then
+      ok "systemd-analyze verify accepts the staged units"
+    else
+      # verify also complains about units it cannot resolve from a temp dir (the .mount it Requires);
+      # only a complaint naming a staged file's own syntax is disqualifying.
+      if grep -E "$stage/.*(Unknown|Invalid|Failed to parse|Missing '=')" /tmp/vault-restic-verify.$$ >/dev/null; then
+        bad "systemd-analyze verify rejects a staged unit: $(grep -E "$stage/" /tmp/vault-restic-verify.$$ | head -2 | tr '\n' ' ')"
+      else
+        ok "systemd-analyze verify: no syntax complaints about the staged units ($(wc -l </tmp/vault-restic-verify.$$) unrelated line(s))"
+      fi
+    fi
+    rm -f /tmp/vault-restic-verify.$$
+  fi
+  if [ "$fail" -eq "$rfail" ]; then
+    install -m 0644 "$stage/$RESTIC_UNIT" "$live" && ok "installed $live"
+    install -m 0644 "$stage/$PRUNE_UNIT" "$UNITDIR/$PRUNE_UNIT" && ok "installed $UNITDIR/$PRUNE_UNIT"
+    install -m 0644 "$stage/$PRUNE_TIMER" "$UNITDIR/$PRUNE_TIMER" && ok "installed $UNITDIR/$PRUNE_TIMER"
+    systemctl daemon-reload
+    systemctl enable --now "$PRUNE_TIMER" >/dev/null 2>&1 && ok "enabled $PRUNE_TIMER (the prune now runs weekly, not after every backup)" \
+      || bad "could not enable $PRUNE_TIMER -- the live unit's prune has been removed and nothing replaced it; restore $live.bak.$stamp"
+    # Prove the live state is what was intended, from systemd's view rather than the files'.
+    systemctl cat "$RESTIC_UNIT" | grep -q -- "--exclude=$IMAGE" && ok "systemd sees the exclude" || bad "systemd does not show the exclude"
+    systemctl cat "$RESTIC_UNIT" | grep -q -- "/srv/fedbench/backups" && ok "systemd sees /srv/fedbench/backups in the backup set" || bad "systemd does not show /srv/fedbench/backups"
+    systemctl cat "$RESTIC_UNIT" | grep -q -- "/srv/nextcloud " && ok "systemd sees /srv/nextcloud kept whole" || bad "/srv/nextcloud is no longer in the backup set"
+    systemctl cat "$RESTIC_UNIT" | grep -q "^ExecStartPost=" && bad "the installed backup unit still has an ExecStartPost" || ok "no ExecStartPost on the backup unit"
+    if [ -n "$live_forget" ]; then
+      systemctl cat "$PRUNE_UNIT" | grep -qF -- "ExecStart=$live_forget" && ok "prune unit's ExecStart is the live policy, verbatim" || bad "prune unit's ExecStart differs from the live policy"
+    fi
+    systemctl is-enabled --quiet "$PRUNE_TIMER" 2>/dev/null && ok "$PRUNE_TIMER is enabled" || bad "$PRUNE_TIMER is not enabled"
+  else
+    bad "staged units failed a check; the live unit was NOT replaced (its backup at $live.bak.$stamp is redundant and can be removed)"
+  fi
+  rm -rf "$stage"
+  [ "$fail" -eq "$rfail" ] || { printf '\n\033[31mRestic step failed; stopping before the image is created.\033[0m\n'; exit 1; }
 fi
 
 step "8. The udev rule, before any loop device exists to match"
@@ -346,9 +457,13 @@ if findmnt -no TARGET "$MOUNT" >/dev/null 2>&1; then
     fi
   fi
   systemctl is-enabled --quiet "$MOUNT_UNIT" 2>/dev/null && ok "$MOUNT_UNIT is enabled (survives reboot)" || bad "$MOUNT_UNIT is not enabled"
-  # Restic is reported, not enforced -- see step 7.
-  systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE" && ok "live $RESTIC_UNIT excludes the image" \
-    || warn "live $RESTIC_UNIT does not exclude the image (managed separately; not changed by this script)"
+  if systemctl cat "$RESTIC_UNIT" 2>/dev/null | grep -q -- "--exclude=$IMAGE"; then
+    ok "live $RESTIC_UNIT excludes the image"
+  elif [ "$RESTIC" -eq 1 ]; then
+    bad "live $RESTIC_UNIT does not exclude the image"
+  else
+    warn "live $RESTIC_UNIT does not exclude the image (--no-restic; each nightly run will read the whole image)"
+  fi
 else
   bad "$MOUNT is not mounted"
 fi

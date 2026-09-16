@@ -167,12 +167,22 @@ util-linux 2.37 the harness could not show it registering, so the installer's ch
 outcome, that the timer's own `fstrim --listed-in` invocation skips the volume, without crediting
 that option.
 
-**The installer does not touch restic.** `restic-backup.service` is managed separately by Owen
-(his call, 2026-09-16); the script only reads the live unit and warns if it lacks
-`--exclude=/storage/vault.img`. The reason that exclude is worth adding when restic is next
-worked on: restic descends into mount points, so the files on the volume are already in the
-nightly backup by way of `/storage`, and the image would add a 512 GiB read every night to store a
-torn copy of the same bytes as one blob. Wasteful, not dangerous; it is a warning, not a gate.
+**Restic, step 7.** `restic-backup.service` is Owen's. The live unit on the box (seen
+2026-09-16) backs up `/storage` and all of `/srv/nextcloud`, runs the prune as an `ExecStartPost`,
+and has no alert; the pg_dump pair in `/srv/fedbench/backups` has no off-host copy at all. Owen
+authorized the installer to replace it with the repo's unit, which adds that path and
+`--exclude=/storage/vault.img`, keeps `/srv/nextcloud` whole, and moves the prune to
+`restic-prune.timer` weekly. Step 7 refuses to guess anything the live unit can supply: it saves
+the live unit with a timestamp, copies the live `restic forget` line verbatim into the prune unit,
+copies the live snapshot tag, removes `OnFailure` from the installed copies if
+`fedbench-alert@.service` is not on the host, runs `systemd-analyze verify` on the staged files,
+and only then installs. It will not run while a backup is in flight. `--no-restic` skips the step
+and leaves the live unit untouched. The live timer is never changed.
+
+One retention subtlety worth knowing: restic groups snapshots by host and path set, so the old
+snapshots (paths `/storage`, `/srv/nextcloud`) form a group that stops receiving new members. The
+keep-N rules retain the newest N of that group indefinitely, so a few dozen old snapshots stay
+until someone forgets them by hand. Harmless, and deliberate over widening the policy.
 
 The PostgreSQL data directory stays on the root mirror. It is already redundant, the artifact that
 has actually been restored is the dump pair (which does relocate), and a database is the one thing

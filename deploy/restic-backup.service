@@ -25,8 +25,11 @@
 # fact been failing is UNVERIFIED -- the "45 of 45 nights" claim that used to sit here came from a
 # document, not from this box's journal. Check: journalctl -u restic-backup.service.
 #
-# Restic is managed by Owen. Nothing in this repo installs this file; it is the change proposed to
-# him, and it is applied only by his hand. The four differences from the live unit, each separable:
+# Restic is managed by Owen. He authorized this file to replace the live unit on 2026-09-16
+# ("confirmed good by me"), and vault-volume-install.sh step 7 does that -- after saving the live
+# unit with a timestamp, copying the live retention policy into restic-prune.service and the live
+# snapshot tag into this ExecStart, and dropping OnFailure if the alert template is absent. The
+# four differences from the live unit, each separable:
 #
 #   1. ADD /srv/fedbench/backups. The nightly pg_dump pair is the only artifact that has actually
 #      been restored and verified, and it currently has no off-host copy. Highest value of the four.
@@ -46,8 +49,8 @@
 # KEPT AS LIVE, deliberately: /srv/nextcloud in full. The earlier repo copy narrowed it to
 # /srv/nextcloud/fedbench, which would have silently DROPPED the rest of that disk from the backup.
 #
-# Undo, if applied: restore the file from the .bak Owen takes before copying this in,
-# systemctl daemon-reload, and disable restic-prune.timer.
+# Undo: cp /etc/systemd/system/restic-backup.service.bak.<stamp> back over the unit,
+# systemctl daemon-reload, systemctl disable --now restic-prune.timer.
 
 [Unit]
 Description=Restic backup to Synology NAS

@@ -20,7 +20,7 @@ export function stripSqlComments(sql: string): string {
   return sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\r\n]*/g, '')
 }
 
-const expectedNumbers = Array.from({ length: 19 }, (_, index) => String(index + 100).padStart(4, '0'))
+const expectedNumbers = Array.from({ length: 20 }, (_, index) => String(index + 100).padStart(4, '0'))
 const numberIn = (file: string) => /^(\d{4})_/.exec(file)?.[1]
 const read = (file: string) => stripSqlComments(readFileSync(resolve(migrations, file), 'utf8'))
 
@@ -28,7 +28,7 @@ describe('self-hosted migration chain remains applicable as a whole', () => {
   it('found migration files to scan at all', () => {
     // Without this, every scan below iterates an empty set and passes while checking nothing: the
     // vacuous green that makes a deleted migration directory read as a verified migration chain.
-    expect(files.length, 'expected at least migrations 0100 through 0118').toBeGreaterThanOrEqual(19)
+    expect(files.length, 'expected at least migrations 0100 through 0119').toBeGreaterThanOrEqual(20)
   })
 
   it('the comment stripper cannot turn prose into a commit', () => {
@@ -39,7 +39,7 @@ describe('self-hosted migration chain remains applicable as a whole', () => {
     expect(statements.trim()).not.toMatch(/commit;$/i)
   })
 
-  it('numbers every migration continuously from 0100 through 0118', () => {
+  it('numbers every migration continuously from 0100 through 0119', () => {
     const numbers = files.map(numberIn)
     expect(numbers, 'a missing or duplicate number breaks the ordered migration dependency chain').toEqual(expectedNumbers)
   })

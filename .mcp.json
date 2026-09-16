@@ -4,7 +4,7 @@
       "type": "http",
       "url": "${VAULT_MCP_URL:-http://127.0.0.1:8099/mcp}",
       "headers": {
-        "Authorization": "Bearer ${VAULT_API_KEY}"
+        "Authorization": "Bearer ${VAULT_MCP_KEY}"
       }
     }
   }

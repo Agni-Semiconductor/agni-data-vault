@@ -43,7 +43,7 @@ function envVarsInCode(): Set<string> {
 const NOT_OURS = new Set(['PORT', 'NODE_ENV', 'CI'])
 // Documented and deliberately absent from the server: these belong to the CLI, the client, or
 // the test suite.
-const CLIENT_OR_CLI = new Set(['VITE_API_BASE_URL', 'VAULT_API_URL', 'FED_PGRST_JWT_SECRET', 'VAULT_REAL_XLSX', 'VAULT_MCP_URL'])
+const CLIENT_OR_CLI = new Set(['VITE_API_BASE_URL', 'VAULT_API_URL', 'FED_PGRST_JWT_SECRET', 'VAULT_REAL_XLSX', 'VAULT_MCP_URL', 'VAULT_MCP_KEY'])
 
 /**
  * Only the forms that INSTRUCT an operator to set something.

@@ -211,15 +211,36 @@ copy_tree() {
     bad "rsync failed for $src"
     return 1
   fi
-  # VERIFY, do not assume. Compare counts and bytes; a truncated copy is the failure that matters
-  # and rsync's exit status has already been known to look fine on a full disk.
-  local sc dc sb db
-  sc=$(find "$src" -xdev | wc -l); dc=$(find "$dst" -xdev | wc -l)
-  sb=$(du -sb "$src" 2>/dev/null | awk '{print $1}'); db=$(du -sb "$dst" 2>/dev/null | awk '{print $1}')
-  if [ "$sc" = "$dc" ] && [ "$sb" = "$db" ]; then
-    ok "verified $dst: $dc entries, $db bytes, identical to source"
+  # VERIFY, do not assume. A truncated copy is the failure that matters and rsync's exit status has
+  # already been known to look fine on a full disk.
+  #
+  # NOT `du -sb`. That sums the apparent size of every entry INCLUDING DIRECTORIES, and a
+  # directory's st_size on XFS depends on its insertion history, so a fresh copy of a large tree
+  # never matches byte-for-byte even when every file does. The first run on edaserver (2026-09-16)
+  # failed exactly there: 26,839 entries on both sides, destination 884,456 bytes LARGER, all of
+  # it directory inodes. Regular-file bytes are the number that means something.
+  local sc dc sf df sb db
+  sc=$(find "$src" -xdev | wc -l);          dc=$(find "$dst" -xdev | wc -l)
+  sf=$(find "$src" -xdev -type f | wc -l);  df=$(find "$dst" -xdev -type f | wc -l)
+  sb=$(find "$src" -xdev -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')
+  db=$(find "$dst" -xdev -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')
+  if [ "$sc" = "$dc" ] && [ "$sf" = "$df" ] && [ "$sb" = "$db" ]; then
+    ok "verified $dst: $dc entries, $df regular files, $db file bytes, same as source"
   else
-    bad "VERIFICATION FAILED for $dst: source $sc entries/$sb bytes, destination $dc/$db"
+    bad "VERIFICATION FAILED for $dst: source $sc entries/$sf files/$sb bytes, destination $dc/$df/$db"
+    return 1
+  fi
+  # Then the check that counts cannot fake: rsync in dry-run with --checksum re-reads every file on
+  # both sides and itemizes anything whose CONTENT differs. Empty output is the proof. This costs a
+  # full read of the tree (seconds for 2.7 GB on NVMe), which is the right price for a move whose
+  # originals are about to be renamed out from under five units.
+  local diffs
+  diffs=$(rsync -aHAX --numeric-ids --checksum --dry-run --itemize-changes "$src"/ "$dst"/ 2>&1 | grep -v '^\.d' | grep -v '^$' | head -20)
+  if [ -z "$diffs" ]; then
+    ok "checksum pass: no file content differs between $src and $dst"
+  else
+    bad "checksum pass found differences between $src and $dst:"
+    printf '%s\n' "$diffs" | sed 's/^/        /'
     return 1
   fi
 }

@@ -1,9 +1,11 @@
-# Restic backup to the Synology NAS -- PROPOSED unit. NOT what is installed.
+# Restic backup to the Synology NAS -- INSTALLED on edaserver 2026-09-16 by vault-volume-install.sh.
 #
-# READ THIS FIRST. The live unit at /etc/systemd/system/restic-backup.service was shown by Owen on
-# 2026-09-16 and it is NOT this file. Commit 5470810 (2026-09-15) added this unit describing its
-# changes as already made ("ADDED TWO PATHS", "REMOVED ExecStartPost"); none of them had landed on
-# the box. The live unit, verbatim, with two lines cut short by the pager (`>`):
+# HISTORY. Commit 5470810 (2026-09-15) added this unit describing its changes as already made; none
+# had landed on the box. Owen showed the live unit on 2026-09-16, authorized the replacement, and
+# step 7 installed it at 09:58 that day, saving the previous unit as
+# /etc/systemd/system/restic-backup.service.bak.20260916T095835. The unit it replaced, verbatim
+# (the two lines the pager cut were later captured in full by the installer: the tag was
+# `scheduled`, the policy `--keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12`):
 #
 #   [Unit]
 #   Description=Restic backup to Synology NAS
@@ -19,17 +21,15 @@
 #   Nice=10
 #   IOSchedulingClass=idle
 #
-# So, today: /storage and ALL of /srv/nextcloud go off-host. /srv/fedbench (the pg_dump pair and the
-# live object store, on the boot mirror) does NOT. The prune still runs as ExecStartPost, so a prune
-# failure still reports as a backup failure. There is no OnFailure alert. Whether the unit has in
-# fact been failing is UNVERIFIED -- the "45 of 45 nights" claim that used to sit here came from a
-# document, not from this box's journal. Check: journalctl -u restic-backup.service.
+# Before the replacement: /storage and ALL of /srv/nextcloud went off-host; /srv/fedbench (the pg_dump
+# pair and the live object store, on the boot mirror) did NOT. The prune ran as ExecStartPost, so a
+# prune failure reported as a backup failure. There was no OnFailure alert. Whether the unit had in
+# fact been failing that way is still UNVERIFIED: journalctl -u restic-backup.service.
 #
 # Restic is managed by Owen. He authorized this file to replace the live unit on 2026-09-16
-# ("confirmed good by me"), and vault-volume-install.sh step 7 does that -- after saving the live
-# unit with a timestamp, copying the live retention policy into restic-prune.service and the live
-# snapshot tag into this ExecStart, and dropping OnFailure if the alert template is absent. The
-# four differences from the live unit, each separable:
+# ("confirmed good by me"). Step 7 saved the live unit with a timestamp, copied the live retention
+# policy into restic-prune.service and the live snapshot tag into this ExecStart, and kept OnFailure
+# because fedbench-alert@.service was present. The four differences from the previous unit:
 #
 #   1. ADD /srv/fedbench/backups. The nightly pg_dump pair is the only artifact that has actually
 #      been restored and verified, and it currently has no off-host copy. Highest value of the four.
@@ -58,7 +58,7 @@ Description=Restic backup to Synology NAS
 # a repository inside the empty mountpoint on the root disk and reports success.
 Requires=mnt-nasbackup.mount
 After=mnt-nasbackup.mount
-# (4) -- remove this line if fedbench-alert@.service is not installed.
+# (4) -- fedbench-alert@.service was present at install time, so this stayed.
 OnFailure=fedbench-alert@%n.service
 
 [Service]

@@ -1,16 +1,16 @@
-# Apply restic's retention policy and reclaim space -- PROPOSED unit, NOT installed.
+# Apply restic's retention policy and reclaim space, weekly, on its own timer.
 #
-# On the box today (verified 2026-09-16) the prune is still an ExecStartPost on restic-backup.service,
-# so a prune failure marks the BACKUP failed. That is the reason to split it: two jobs with two
-# failure modes and two urgencies do not belong behind one exit status. Whether the live unit has
-# actually been failing that way is UNVERIFIED; the earlier "45 of 45 nights" claim here came from a
-# document, not this box's journal.
+# Until 2026-09-16 the prune was an ExecStartPost on restic-backup.service, so a prune failure marked
+# the BACKUP failed. That is the reason for the split: two jobs with two failure modes and two
+# urgencies do not belong behind one exit status. Whether the old shape had actually been failing
+# that way is UNVERIFIED; the earlier "45 of 45 nights" claim came from a document, not this box's
+# journal.
 #
-# THE RETENTION FLAGS BELOW ARE NOT WHAT GETS INSTALLED. vault-volume-install.sh step 7 replaces the
-# ExecStart line with the live unit's own ExecStartPost value, verbatim, at install time -- the
-# policy on the box is the policy, and a prune with the wrong policy deletes snapshots. The line
-# here is the fallback only if the live unit has no ExecStartPost, and past --keep-daily 14 it was
-# never verified against this box (the pager cut the live line at "--keep-weekl>").
+# INSTALLED on edaserver 2026-09-16 by vault-volume-install.sh step 7, which wrote the ExecStart line
+# from the live unit's own ExecStartPost value rather than from this file. The captured live policy
+# was --keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune, which is exactly
+# the line below, so the file and the box now agree. If the policy ever changes, change it on the
+# box AND here; the installer only copies live -> installed, never repo -> live, for this line.
 #
 # Restic is managed by Owen; installed under his authorization of 2026-09-16.
 # Undo: systemctl disable --now restic-prune.timer and put the ExecStartPost back on the backup.
@@ -29,7 +29,7 @@ OnFailure=fedbench-alert@%n.service
 Type=oneshot
 Environment=RESTIC_CACHE_DIR=/var/cache/restic
 EnvironmentFile=/etc/restic/backup.env
-# --keep-hourly 24 --keep-daily 14 are confirmed from the live unit; everything after is unverified.
+# Verified against the live unit on 2026-09-16, flag for flag.
 ExecStart=/usr/bin/restic forget --keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
 Nice=10
 IOSchedulingClass=idle

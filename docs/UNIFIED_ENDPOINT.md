@@ -861,6 +861,18 @@ the order of operations. Then `relocate-fedbench-data.sh --dest /storage/vault` 
 store, the backups and the cold archive onto it with the old paths bind-mounted back. Postgres stays
 on the root mirror, as that script already argues.
 
+**DONE on the box 2026-09-16 09:58**, zero warnings: 512 GiB allocated (513G by `stat`, XFS
+rounding), formatted without a pre-format discard, mounted at `/storage/vault` from `/dev/loop0`,
+labelled `var_t`, `discard_max_bytes=0` on the loop device, the weekly `fstrim` invocation skips
+it. The same run replaced `restic-backup.service` under Owen's authorization: the live unit had
+never matched the repo's "adopted" copy (it backed up `/storage` and all of `/srv/nextcloud`, ran
+the prune as `ExecStartPost`, no alert, and **the pg_dump pair had no off-host copy**). The
+installed unit adds `/srv/fedbench/backups` and the image exclude, keeps `/srv/nextcloud` whole,
+and moves the prune to `restic-prune.timer` with the live policy copied verbatim
+(`--keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-monthly 12`). The previous unit is at
+`restic-backup.service.bak.20260916T095835`. `restic-backup.timer` is still unverified against the
+repo copy. Relocation onto the volume is the next step and had not run at the time of writing.
+
 This changes nothing about the second-copy gate. Archive and live objects now share one mirror,
 which the restic copy to the NAS is what answers — a mirror is still not a backup.
 

@@ -83,9 +83,11 @@ a scope conversation, not a config change.
 
 ## 3. Credentials: what you get, where it lives, what you never do
 
-**What you get.** An HS256 JWT with claim `{"role": "connect_read"}`, minted by Owen with
-`tools/mint_service_jwt.py --role connect_read` from the testbench repo, signed with the shared
-`PGRST_JWT_SECRET`. You do not get the secret. You do not ask for it. Whoever holds it can mint a
+**What you get.** An HS256 JWT with claim `{"role": "connect_read"}`, minted by Owen on the box
+with `deploy/mint-connect-token.sh`, signed with the shared `PGRST_JWT_SECRET`. That script mints
+`connect_read` and nothing else, and its `--prove` mode reads `connect.kinds` (must be ≥ 7 rows)
+and then confirms the same token is **refused** on `vault` and `public` before any token is handed
+out. You do not get the secret. You do not ask for it. Whoever holds it can mint a
 `vault_service` token, which holds `BYPASSRLS` and writes every table; "read access for
 agni-connect" and "unrestricted write access to all measurement data" would be the same string.
 
@@ -368,7 +370,11 @@ Follow `docs/PLATFORM_BLUEPRINT.md` §5 and §9 for the mechanics. The order tha
    **not** under any `/home`: on RHEL 9 a tree under a home directory is `user_home_t` and systemd
    will not exec from it (`203/EXEC`). See `deploy/README.md` "RHEL 9 SELinux" for the fcontext
    rules that fix a service checkout.
-3. **Database.** Ask Owen to create `agni_devops` and your roles, or run the DDL as `postgres`.
+3. **Database.** Owen runs `deploy/connect-db-bootstrap.sh` on the box. It creates `connect_owner`
+   and `connect_app` (both `NOLOGIN`), `agni_devops` owned by `connect_owner` with `CONNECT`
+   revoked from `PUBLIC` and granted to `connect_app`, and with `--api-login connect_api` a
+   `LOGIN` role in `connect_app` whose password is printed once. It then proves those roles hold
+   nothing in `fedbench`. Your libpq URL is `postgresql://connect_api@127.0.0.1:5432/agni_devops`.
    Run your migrations against it with the absolute-path `psql`.
 4. **Credential.** Receive the `connect_read` token; write `/etc/agni-connect/api.env` (`0640`,
    `root:<svc>`); reference it from your unit with `EnvironmentFile=`.

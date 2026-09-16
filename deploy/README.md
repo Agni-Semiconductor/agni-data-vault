@@ -380,6 +380,28 @@ authenticates rather than relying on the name being unguessable.
   answers. Unset, those answers carry a path instead of a full URL -- a worse answer, not a broken
   endpoint.
 
+## Provisioning agni-connect
+
+Two scripts, both run on the box as root, both self-checking, neither touching `fedbench`'s data.
+
+`deploy/mint-connect-token.sh` mints the `connect_read` token agni-connect reads measurement data
+with. The role is a constant, not an argument: the data plane is HS256, so whoever can mint
+`connect_read` can mint `vault_service`, and this script exists so the person holding the secret
+never has to reason about the wide token while handing out the narrow one. Run `--prove` first: it
+mints, reads `connect.kinds` over loopback (≥ 7 rows, because a grant fault on this cluster returns
+`[]` with a 200), reads `connect.health`, and then confirms the same token gets **403** on `vault`
+and `public`. It prints no token. A plain run prints the token alone on stdout for a secrets tool
+and nothing else; the value goes into agni-connect's SOPS as `CONNECT_VAULT_TOKEN` and nowhere
+else.
+
+`deploy/connect-db-bootstrap.sh` creates agni-connect's own database and roles on the shared
+cluster (see `docs/CONNECT_AGENT_HANDOFF.md` §8 for why not a schema in `fedbench`): `connect_owner`
+and `connect_app`, `agni_devops` owned by the former with `CONNECT` revoked from `PUBLIC`, and with
+`--api-login connect_api` a `LOGIN` role whose password is printed once and stored nowhere. It uses
+the absolute `psql` path because Calibre's client shadows the real one, and it finishes by proving
+the new roles hold nothing in `fedbench`. Re-running is a no-op; it refuses to reset a login role's
+password it did not just create.
+
 ## Connecting an MCP client
 
 `vault-api` answers the Model Context Protocol at `POST /mcp`, and at `/api/mcp` -- which is the

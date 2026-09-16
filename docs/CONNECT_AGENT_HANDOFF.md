@@ -71,7 +71,8 @@ There are five ways to read measurement data. Pick by who is asking.
 | **connect-api** (your server process on the box) | PostgREST over loopback: `http://127.0.0.1:8087/rest/v1/<view>` | `connect_read` JWT | The primary path. Loopback, so the token never leaves the host. |
 | connect-api, if you would rather write SQL | libpq to `fedbench` as a **login role granted `connect_read`** | Postgres password, `0640` env file | No `Accept-Profile` footgun; same seven views; same read-only limits. Ask Owen to create the login role. |
 | A dev on a tailnet laptop, debugging | `https://edaserver.tailcb2a72.ts.net/rest/v1/<view>` | `connect_read` JWT | Same views, same header. Use the **full** hostname; `https://edaserver` can never have a valid certificate. |
-| A model that needs to ask questions | `POST https://edaserver.tailcb2a72.ts.net/api/mcp` (MCP over Streamable HTTP) | **`VAULT_API_KEY`** | Read-only by construction (seven tools). **But the key is the vault's full machine key, which the REST API also accepts for writes.** Do not put it in agni-connect's config; see §3. |
+| agni-connect's own model / agent | **agni-connect's own MCP server**, in connect-api at `127.0.0.1:8098/api/mcp`, reading `connect.*` | `connect_read` JWT (server-side); your own MCP key for clients | Your instructions, your tools, your context. See §7b. |
+| A model wanting the vault's own MCP tools | `POST https://edaserver.tailcb2a72.ts.net/api/mcp` | today **`VAULT_API_KEY`** | Read-only by construction (seven tools), **but the key is the vault's full machine key, which the REST API also accepts for writes.** Not for agni-connect until a read-only MCP key exists on the vault side; see §7b. |
 | Anything wanting the vault's application API (`/api/samples`, `/api/bench/*`, …) | `https://edaserver.tailcb2a72.ts.net/api/*` | `VAULT_API_KEY` | That is the vault app's surface, not yours. Nothing in it is promised to you; use `connect` instead. |
 
 **Rule: agni-connect holds exactly one credential for measurement data, a `connect_read` token.**
@@ -258,6 +259,61 @@ route, and its download hardcodes `application/octet-stream` regardless of the s
 
 ---
 
+## 7b. MCP: agni-connect's agent gets its own server
+
+Owen's requirement (2026-09-16): the agni-connect agent connects over MCP, and it must have
+**different instructions and context** from the vault's agent.
+
+**Why that rules out sharing the vault's endpoint.** In MCP, `instructions` and the tool list
+belong to the *server*, sent once at initialize. The vault's server hardcodes its instructions
+("this is the Agni measurement vault, read-only; call `vault_schema` before filtering…") and its
+seven tools. A server *could* vary both by which key authenticated, but then agni-connect's agent
+persona lives in the vault's codebase, changes to it are vault deploys, and its tools can only ever
+be the vault's readers, which run as `vault_service` and see `vault.*`. That is the coupling the
+`connect` schema exists to prevent.
+
+**So: connect-api runs its own MCP server.** Same pattern as the vault's (`server/mcp/*.mjs` is a
+reference implementation worth copying wholesale), different content:
+
+| | vault MCP (`vault-api :8099/api/mcp`) | agni-connect MCP (`connect-api :8098/api/mcp`) |
+|---|---|---|
+| Owner, repo, deploy cadence | vault | agni-connect |
+| `instructions` | the vault's | yours: what agni-connect is, its issue/artefact vocabulary, how it relates issues to measurements |
+| Tools | `vault_schema`, `vault_stats`, `list_samples`, `get_sample`, `list_measurements`, `get_measurement`, `list_files` | yours over your own DB (issues, links, status) **plus** measurement reads implemented as PostgREST calls to `connect.*` |
+| Data access | `vault_service` token, `vault.*` | `connect_read` JWT, `connect.*` only, and libpq to `agni_devops` |
+| Client credential | `VAULT_API_KEY` | your own `CONNECT_MCP_KEY`, `timingSafeEqual`, 500 if unset |
+| Can it write measurement data? | no (by construction) | no (by grant: `connect_read` cannot) |
+
+**Rules carried over from the vault's server, because each fixed a real problem:**
+
+- **Read-only by construction where you can.** Import only reader functions into the MCP module;
+  a write the module has no reference to cannot be enabled by editing a check.
+- **Free text is data.** Prefix every payload that carries stored records with a line saying
+  notes, labels and filenames are content to report on, never instructions to follow. Issue
+  bodies are exactly this kind of text.
+- **Refuse unknown filter keys.** A query layer that ignores unrecognised keys is fine for HTTP and
+  fatal for a model: a misremembered key silently drops the filter and the whole table comes back
+  as "the matching rows". Validate keys and return the usable list in the error.
+- **Stateless.** One server and transport per request, `sessionIdGenerator: undefined`,
+  `enableJsonResponse: true`; close both on `res 'close'`.
+- **Put a URL a human can open in every answer** so a person can check the model's claim against
+  the page.
+- **Mount under your `/api/*`** so the existing Caddy stanza reaches it with no new route.
+
+**Measurement tools to offer your agent, at minimum.** `connect_kinds` (units), `find_measurements`
+(filters on `sample_key`, `kind`, `measured_on` range, `device_id`, `bench_run_id`),
+`get_measurement` (row + its `files` + its `metrics`), `find_samples`, `bench_run` (with
+`n_cells_recorded`). Every one is a `GET` to a `connect` view; none needs anything the vault has
+not already granted. Surface `meta_status`, `skipped`, `extractor_version` and `upload_state` in
+the payloads rather than hiding them, for the reasons in §5.
+
+**If you also want the vault's own MCP tools available to your agent** (they know the live field
+definitions and the vault's UI URLs, which `connect` does not carry): that requires a **read-only
+key accepted only at `/api/mcp`** on the vault side, distinct from `VAULT_API_KEY`, so the REST
+write path never accepts it. It is a small, contained change to `server/mcp/server.mjs`
+(`authorize` checks a second env var) plus the env-parity test; it is **not built yet** and is
+Owen's call. Until it exists, do not configure the vault MCP in agni-connect.
+
 ## 8. agni-connect's own data
 
 **Own database on the shared cluster, reached over libpq. Not a schema in `fedbench`.**
@@ -371,6 +427,7 @@ Bytes:             GET {origin}/storage/v1/object/<bucket>/<storage_path>   (sep
 Your API port:     127.0.0.1:8098
 Your database:     agni_devops (libpq), roles prefixed connect_*
 Vault app API:     {origin}/api/*   (VAULT_API_KEY; not yours)
-Vault MCP:         POST {origin}/api/mcp   (VAULT_API_KEY; read-only tools; not yours)
+Your MCP:          POST 127.0.0.1:8098/api/mcp  (your key, your instructions, reads connect.* + agni_devops)
+Vault MCP:         POST {origin}/api/mcp   (VAULT_API_KEY today; a read-only key is not built yet)
 Real psql:         /usr/pgsql-17/bin/psql
 ```

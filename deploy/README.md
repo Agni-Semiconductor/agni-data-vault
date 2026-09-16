@@ -397,12 +397,20 @@ touching any other line; restart `vault-api` afterwards. Read it with
 accepted here; a browser session is the wrong credential for a machine client.
 
 The repo's `.mcp.json` points at `http://127.0.0.1:8099/mcp` by default so a local checkout works
-with nothing set. Against the box, set both:
+with nothing set. It reads two **client-side** variables, and the key one is deliberately not
+called `VAULT_API_KEY`: a person's Claude client should hold the reader key, and a variable named
+after the write key invites pasting the write key into it. Against the box, set both in the user's
+environment (on Windows, `setx` then restart the client so it re-reads them):
 
 ```
-VAULT_MCP_URL=https://<host>/api/mcp
-VAULT_API_KEY=<the key>
+VAULT_MCP_URL=https://edaserver.<tailnet>.ts.net/api/mcp
+VAULT_MCP_KEY=<VAULT_MCP_READ_KEY from /etc/vault/vault-api.env>
 ```
+
+**The running API must actually carry the code that accepts the reader key.** `vault-api` runs
+from the staged tree at `/srv/vault/app`, not from the git checkout, so a server change is live only
+after the tree is re-staged and `vault-api-install.sh` re-run. The symptom of forgetting is exactly
+`401` for the reader key while `VAULT_API_KEY` still works.
 
 Verify it end to end rather than by reading the port: a client that connects but whose first
 `tools/list` returns nothing is the failure worth catching.
